@@ -1,8 +1,12 @@
-// Command aw is the demo and litmus for the aw runtime: one Claude model writes
-// a candidate, a jury of three independent models votes on it under a k-of-N
-// quorum, and the decision is committed to a content-addressed store. Pass a
-// candidate as the first argument to skip generation and watch the jury judge
-// something you chose (e.g. a deliberately bad note).
+// Command aw is the demo and litmus for the aw runtime.
+//
+// With no argument it runs the full gate: one Claude model writes a release
+// note, a jury of three independent models votes under a k-of-N quorum, and on
+// a rejection the critique is fed back and the note regenerated, up to three
+// attempts. The accepted decision is committed to a content-addressed store.
+//
+// With an argument it skips generation and runs a one-shot jury on the text you
+// pass — handy for watching the panel reject a deliberately bad note.
 //
 //	go run ./cmd/aw
 //	go run ./cmd/aw "The aw run --json flag is here. It streams events. You can pipe it. Enjoy."
@@ -23,47 +27,49 @@ import (
 	"github.com/valbaudo/aw/store"
 )
 
-const reviewer = "You are a strict, independent reviewer. Approve the release note ONLY if it is " +
-	"EXACTLY three sentences AND explicitly names the `aw run --json` feature. Be harsh."
+const (
+	reviewer = "You are a strict, independent reviewer. Approve the release note ONLY if it is " +
+		"EXACTLY three sentences AND explicitly names the `aw run --json` feature. Be harsh."
+	maxAttempts = 3
+)
 
 func main() {
 	ctx := context.Background()
 	blobs := store.NewMem()
-
 	judges := backends(env("AW_JURY", "haiku,sonnet,opus"))
 	genModel := env("AW_GEN", "sonnet")
+	quorum := gate.Majority(len(judges))
 
-	// [1] candidate: injected (first arg) or generated.
 	var candidate string
+	var approved bool
+	var votes []gate.Verdict
+
 	if len(os.Args) > 1 && strings.TrimSpace(os.Args[1]) != "" {
+		// One-shot jury on an injected candidate.
 		candidate = os.Args[1]
-		fmt.Println("[1] injected candidate")
+		fmt.Printf("[jury] injected candidate, %d judges, quorum k=%d\n", len(judges), quorum)
+		jctx, cancel := context.WithTimeout(ctx, 200*time.Second)
+		approved, votes = gate.Jury(jctx, judges, reviewer, candidate, quorum)
+		cancel()
 	} else {
-		fmt.Printf("[1] generate candidate (%s)\n", genModel)
-		gctx, cancel := context.WithTimeout(ctx, 150*time.Second)
-		res, err := claude.Backend{Model: genModel}.Invoke(gctx, aw.Invocation{
-			System: "You write concise release notes.",
-			Prompt: "Write a three-sentence release note for a new `aw run --json` flag that streams machine-readable events.",
-			Schema: object("release_note"),
-		})
+		// Full gate: generate -> jury -> repair.
+		fmt.Printf("[gate] generate(%s) -> jury of %d, quorum k=%d, up to %d attempts\n",
+			genModel, len(judges), quorum, maxAttempts)
+		gctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+		out, err := gate.Gate(gctx, generator(genModel), judges, reviewer, quorum, maxAttempts)
 		cancel()
 		if err != nil {
 			fatal(err)
 		}
-		candidate = str(res.Output, "release_note", "text")
+		candidate, approved, votes = out.Candidate, out.Approved, out.Votes
+		fmt.Printf("  settled on attempt %d of %d\n", out.Attempts, maxAttempts)
 	}
+
 	cref, err := blobs.Put([]byte(candidate))
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("  committed %s:\n  %q\n\n", short(cref), candidate)
-
-	// [2] jury: independent k-of-N vote.
-	quorum := gate.Majority(len(judges))
-	fmt.Printf("[2] jury of %d different models, quorum k=%d\n", len(judges), quorum)
-	jctx, cancel := context.WithTimeout(ctx, 200*time.Second)
-	approved, votes := gate.Jury(jctx, judges, reviewer, candidate, quorum)
-	cancel()
+	fmt.Printf("  candidate %s:\n  %q\n", short(cref), candidate)
 	for _, v := range votes {
 		if v.Err != nil {
 			fmt.Printf("  %-14s ERROR %s\n", v.Judge, oneLine(v.Err.Error()))
@@ -73,8 +79,8 @@ func main() {
 	}
 	fmt.Printf("  => VERDICT: approved=%v\n\n", approved)
 
-	// [3] commit the decision; read it back (all "resume" does).
-	fmt.Println("[3] commit decision to content-addressed store")
+	// Commit the decision; read it back (all "resume" does).
+	fmt.Println("[commit] content-addressed store")
 	decision, err := json.Marshal(map[string]any{"candidate": cref, "approved": approved, "votes": votes})
 	if err != nil {
 		fatal(err)
@@ -89,10 +95,29 @@ func main() {
 	fmt.Printf("  committed + read back: %s\n", short(dref))
 }
 
+// generator returns a Generate closure that writes a release note with the given
+// model, folding any prior-attempt critique into the next prompt.
+func generator(model string) gate.Generate {
+	return func(ctx context.Context, feedback string) (string, error) {
+		prompt := "Write a three-sentence release note for a new `aw run --json` flag that streams machine-readable events."
+		if feedback != "" {
+			prompt += "\n\n" + feedback
+		}
+		res, err := claude.Backend{Model: model}.Invoke(ctx, aw.Invocation{
+			System: "You write concise release notes.",
+			Prompt: prompt,
+			Schema: object("release_note"),
+		})
+		if err != nil {
+			return "", err
+		}
+		return str(res.Output, "release_note", "text"), nil
+	}
+}
+
 func backends(csv string) []aw.Backend {
-	models := strings.Split(csv, ",")
-	out := make([]aw.Backend, 0, len(models))
-	for _, m := range models {
+	var out []aw.Backend
+	for _, m := range strings.Split(csv, ",") {
 		if m = strings.TrimSpace(m); m != "" {
 			out = append(out, claude.Backend{Model: m})
 		}
@@ -100,7 +125,6 @@ func backends(csv string) []aw.Backend {
 	return out
 }
 
-// object builds a minimal single-string-field JSON Schema.
 func object(field string) map[string]any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
@@ -109,7 +133,6 @@ func object(field string) map[string]any {
 	}
 }
 
-// str returns the first present string key from out.
 func str(out map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if s, ok := out[k].(string); ok && s != "" {
