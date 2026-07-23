@@ -1,0 +1,5 @@
+# built binaries
+/aw
+/cmd/aw/aw
+*.test
+*.out
