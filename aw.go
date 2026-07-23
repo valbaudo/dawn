@@ -52,6 +52,11 @@ type Invocation struct {
 type Result struct {
 	Output map[string]any // typed output (validated against Invocation.Schema by the caller)
 	Tokens Tokens         // cost / cache signal
+	// Produced holds new state refs this invocation created — a workspace diff,
+	// a captured session, an artifact. Empty for a plain text call. This is the
+	// other half of state transfer: what one invocation emits, the next consumes
+	// via Invocation.Inputs.
+	Produced map[string]Ref `json:"produced,omitempty"`
 }
 
 // Tokens is the usage signal every backend surfaces. CacheRead/CacheCreate make
