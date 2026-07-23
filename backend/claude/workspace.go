@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -54,9 +55,26 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 		bin = "claude"
 	}
 
+	// Resolve the working tree: an explicit Dir, or materialize an input
+	// workspace ref into a fresh temp dir — this is how repo@vN reaches the
+	// next agent.
+	dir := w.Dir
+	if dir == "" {
+		ref, ok := workspaceInput(in.Inputs)
+		if !ok {
+			return aw.Result{}, fmt.Errorf("workspace: set Dir, or pass a workspace ref in Inputs to materialize")
+		}
+		d, cleanup, err := w.materialize(ctx, ref)
+		if err != nil {
+			return aw.Result{}, err
+		}
+		defer cleanup()
+		dir = d
+	}
+
 	cmd := exec.CommandContext(ctx, bin, "-p", prompt, "--model", model,
 		"--output-format", "json", "--dangerously-skip-permissions")
-	cmd.Dir = w.Dir
+	cmd.Dir = dir
 	cmd.Stdin = nil
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -71,7 +89,7 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 		return aw.Result{}, fmt.Errorf("claude: reported error: %s", env.Result)
 	}
 
-	diff, err := gitDiff(ctx, w.Dir)
+	diff, err := gitDiff(ctx, dir)
 	if err != nil {
 		return aw.Result{}, err
 	}
@@ -83,15 +101,77 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 			CacheRead:   env.Usage.CacheReadTokens,
 			CacheCreate: env.Usage.CacheCreationTokens,
 		},
+		Produced: map[string]aw.Ref{},
 	}
-	if w.Store != nil && diff != "" {
-		ref, err := w.Store.Put([]byte(diff))
-		if err != nil {
-			return aw.Result{}, fmt.Errorf("commit diff: %w", err)
+	if w.Store != nil {
+		if diff != "" {
+			ref, err := w.Store.Put([]byte(diff))
+			if err != nil {
+				return aw.Result{}, fmt.Errorf("commit diff: %w", err)
+			}
+			res.Produced["diff"] = aw.Ref{Kind: aw.KindArtifact, URI: ref, Media: "text/x-diff"}
 		}
-		res.Produced = map[string]aw.Ref{"diff": {Kind: aw.KindArtifact, URI: ref, Media: "text/x-diff"}}
+		// Capture the resulting tree so it can be fed to the next invocation.
+		tree, err := tarTree(dir)
+		if err != nil {
+			return aw.Result{}, fmt.Errorf("capture workspace: %w", err)
+		}
+		wref, err := w.Store.Put(tree)
+		if err != nil {
+			return aw.Result{}, fmt.Errorf("commit workspace: %w", err)
+		}
+		res.Produced["workspace"] = aw.Ref{Kind: aw.KindWorkspace, URI: wref, Media: "application/x-tar+gzip"}
 	}
 	return res, nil
+}
+
+// workspaceInput returns the first workspace-kind ref in inputs, if any.
+func workspaceInput(inputs map[string]aw.Ref) (aw.Ref, bool) {
+	for _, r := range inputs {
+		if r.Kind == aw.KindWorkspace {
+			return r, true
+		}
+	}
+	return aw.Ref{}, false
+}
+
+// Materialize writes a stored workspace ref (a gzip'd tar captured when a
+// Workspace invocation snapshotted its tree) into dir. Exposed so a caller can
+// inspect or reuse a captured workspace outside a backend run.
+func Materialize(b store.Blobs, ref aw.Ref, dir string) error {
+	data, err := b.Get(ref.URI)
+	if err != nil {
+		return fmt.Errorf("materialize: %w", err)
+	}
+	return untarTree(data, dir)
+}
+
+// materialize writes a workspace ref into a fresh temp dir and gives it a
+// baseline git commit, so the agent edits repo@vN and gitDiff has a HEAD to diff
+// against. The caller must invoke cleanup when done.
+func (w Workspace) materialize(ctx context.Context, ref aw.Ref) (dir string, cleanup func(), err error) {
+	if w.Store == nil {
+		return "", nil, fmt.Errorf("workspace: Store required to materialize an input")
+	}
+	dir, err = os.MkdirTemp("", "aw-ws-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup = func() { _ = os.RemoveAll(dir) }
+	if err := Materialize(w.Store, ref, dir); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	for _, args := range [][]string{
+		{"init", "-q"}, {"config", "user.email", "aw@example.com"},
+		{"config", "user.name", "aw"}, {"add", "-A"}, {"commit", "-qm", "baseline"},
+	} {
+		if out, e := gitCmd(ctx, dir, args...); e != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("materialize baseline git %v: %v: %s", args, e, out)
+		}
+	}
+	return dir, cleanup, nil
 }
 
 // gitDiff stages every change (so new and deleted files also appear) and returns

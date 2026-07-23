@@ -14,10 +14,11 @@ and everything else is plain code whose dependency arrows all point at `aw`.
 | `aw.go` | core types + the `Backend` seam | nothing |
 | `store/` | content-addressed `Blobs` (seam): `Mem` + durable `FS` | nothing |
 | `gate/` | judge / jury / k-of-N quorum / repair loop — a library, not an engine | `aw` |
-| `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures a diff | `aw`, `store` |
+| `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures + materializes a tree | `aw`, `store` |
 | `plan/` | strict static-DAG runner: typed input wiring, no control flow, resume | `aw`, `store`, `yaml.v3` |
 | `cmd/aw/` | `aw run` (pipeline) and `aw demo` (gate) | all |
 | `cmd/aw-fix/` | kind-2 demo: claude edits a throwaway repo, jury judges the diff | claude, gate, store |
+| `cmd/aw-chain/` | workspace forward: fix a repo, feed the result to a second agent | claude, store |
 
 Add a backend or a store behind its interface; the core never changes. Resume is not a
 feature — it is re-reading committed refs from the store.
@@ -35,6 +36,7 @@ go run ./cmd/aw demo "One sentence. Two sentence. Three. Four."   # watch the ju
 go run ./cmd/aw run examples/pipeline.yaml --store .aw --state run.json
 go run ./cmd/aw run examples/pipeline.yaml --store .aw --state run.json   # re-run: skips committed steps
 go run ./cmd/aw-fix                             # claude fixes a bug; jury judges the diff
+go run ./cmd/aw-chain                           # fix a repo, feed repo@v2 to a second agent
 ```
 
 ## The plan format
@@ -60,8 +62,16 @@ steps:
     output: sentence
 ```
 
+## State transfer
+
+An invocation produces state refs (`Result.Produced`) and consumes them
+(`Invocation.Inputs`). A `Workspace` invocation captures its tree as a
+content-addressed `workspace` ref; a later invocation materializes that ref into
+a fresh dir and builds on it — so `repo@v1 → agent → repo@v2 → agent → repo@v3`
+flows with no shared mutable directory. `cmd/aw-chain` demonstrates it.
+
 ## Not here yet
 
-`workspace`/`session` state refs materialized as inputs, more backends (codex, an HTTP
-LLM), and a YAML frontend that compiles to a canonical model. Each slots behind an
-existing seam without touching the core.
+`session` refs (claude `--resume`), more backends (codex, an HTTP LLM), workspace
+inputs wired through the plan format, and a YAML frontend over a canonical model.
+Each slots behind an existing seam without touching the core.

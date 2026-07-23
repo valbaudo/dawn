@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/valbaudo/aw"
+	"github.com/valbaudo/aw/store"
 )
 
 // gitDiff is the non-trivial capture logic (stage everything, diff against HEAD).
@@ -62,6 +65,37 @@ func TestGitDiffEmptyWhenNoChange(t *testing.T) {
 	}
 	if strings.TrimSpace(diff) != "" {
 		t.Fatalf("clean tree should diff empty, got:\n%s", diff)
+	}
+}
+
+// materialize is the forward-the-workspace path: a stored tree ref becomes a
+// working dir with a git baseline, ready for the next agent — no claude needed.
+func TestMaterializeRestoresTreeWithBaseline(t *testing.T) {
+	src := t.TempDir()
+	write(t, src, "calc.go", "package calc\n")
+	data, err := tarTree(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs := store.NewMem()
+	ref, err := blobs.Put(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := Workspace{Store: blobs}
+	dir, cleanup, err := w.materialize(context.Background(), aw.Ref{Kind: aw.KindWorkspace, URI: ref})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if got := read(t, dir, "calc.go"); got != "package calc\n" {
+		t.Fatalf("materialized file = %q", got)
+	}
+	// a baseline commit must exist so a later gitDiff has a HEAD to diff against
+	if out, err := gitCmd(context.Background(), dir, "rev-parse", "HEAD"); err != nil {
+		t.Fatalf("materialized tree has no HEAD: %v: %s", err, out)
 	}
 }
 
