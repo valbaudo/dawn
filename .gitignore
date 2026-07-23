@@ -3,3 +3,7 @@
 /cmd/aw/aw
 *.test
 *.out
+
+# local run state / stores (README examples)
+/.aw/
+run.json

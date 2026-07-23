@@ -1,0 +1,26 @@
+# A static two-step pipeline: one agent drafts, another tightens. Steps are wired
+# by TYPED references (inputs.*.from), never string templating, and there is no
+# control flow — that lives in code around aw, not in this file.
+version: 1
+
+agents:
+  writer:
+    backend: claude
+    model: sonnet
+  editor:
+    backend: claude
+    model: opus
+
+steps:
+  - id: draft
+    agent: writer
+    prompt: Write one vivid sentence about content-addressed storage.
+    output: sentence
+
+  - id: tighten
+    agent: editor
+    needs: [draft]
+    prompt: Rewrite the provided sentence to be tighter and more concrete. Return only the rewrite.
+    inputs:
+      draft: { from: steps.draft.sentence }
+    output: sentence

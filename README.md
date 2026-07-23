@@ -4,35 +4,64 @@ Glue agent invocations together behind an independent acceptance gate. Lean by d
 
 The whole core is three ideas: an `Invocation`, a `Result`, and a `Backend` that turns
 one into the other. Everything else is a thin, single-purpose package over those types.
+Two seams vary — `Backend` (how one invocation runs) and `Blobs` (where state commits) —
+and everything else is plain code whose dependency arrows all point at `aw`.
 
 ## Layout
 
 | Path | What | Depends on |
 |------|------|------------|
 | `aw.go` | core types + the `Backend` seam | nothing |
-| `store/` | content-addressed `Blobs` (seam) + in-memory impl | nothing |
-| `gate/` | judge / jury / k-of-N quorum — a library, not an engine | `aw` |
-| `backend/claude/` | a `Backend` over the `claude -p` CLI (no API key) | `aw` |
-| `cmd/aw/` | demo: generate a note, a 3-model jury votes, commit | all |
+| `store/` | content-addressed `Blobs` (seam): `Mem` + durable `FS` | nothing |
+| `gate/` | judge / jury / k-of-N quorum / repair loop — a library, not an engine | `aw` |
+| `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures a diff | `aw`, `store` |
+| `plan/` | strict static-DAG runner: typed input wiring, no control flow, resume | `aw`, `store`, `yaml.v3` |
+| `cmd/aw/` | `aw run` (pipeline) and `aw demo` (gate) | all |
+| `cmd/aw-fix/` | kind-2 demo: claude edits a throwaway repo, jury judges the diff | claude, gate, store |
 
-Two seams vary, everything else is plain code: `Backend` (how one invocation runs) and
-`Blobs` (where state commits). Add a backend or a store behind its interface; the core
-never changes. Resume is not a feature — it is re-reading committed refs.
+Add a backend or a store behind its interface; the core never changes. Resume is not a
+feature — it is re-reading committed refs from the store.
+
+One dependency, `gopkg.in/yaml.v3`, used only by the plan loader. The core is dep-free.
 
 ## Try it
 
 Uses your local Claude Code login (no API key):
 
 ```sh
-go test ./...
-go run ./cmd/aw
-go run ./cmd/aw "The aw run --json flag is here. It streams events. You can pipe it. We hope you enjoy it."
+go test ./...                                  # deterministic; no network
+go run ./cmd/aw demo                            # generate -> 3-model jury -> repair
+go run ./cmd/aw demo "One sentence. Two sentence. Three. Four."   # watch the jury reject
+go run ./cmd/aw run examples/pipeline.yaml --store .aw --state run.json
+go run ./cmd/aw run examples/pipeline.yaml --store .aw --state run.json   # re-run: skips committed steps
+go run ./cmd/aw-fix                             # claude fixes a bug; jury judges the diff
 ```
 
-The first run generates a good note and the jury passes it; the second feeds a
-four-sentence note and the jury rejects it.
+## The plan format
+
+Strict and control-flow-free: steps are wired by TYPED references, never string
+templating, and any unknown key (`if:`, `loop:`, `map:`) is a parse error.
+
+```yaml
+version: 1
+agents:
+  writer: { backend: claude, model: sonnet }
+steps:
+  - id: draft
+    agent: writer
+    prompt: Write one sentence about content-addressed storage.
+    output: sentence
+  - id: tighten
+    agent: writer
+    needs: [draft]
+    prompt: Tighten the provided sentence. Return only the rewrite.
+    inputs:
+      draft: { from: steps.draft.sentence }
+    output: sentence
+```
 
 ## Not here yet
 
-Bounded-YAML runner, `workspace`/`session` state refs, crash-resume, and more backends
-(codex, an HTTP LLM). Each slots behind an existing seam without touching the core.
+`workspace`/`session` state refs materialized as inputs, more backends (codex, an HTTP
+LLM), and a YAML frontend that compiles to a canonical model. Each slots behind an
+existing seam without touching the core.
