@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/valbaudo/aw"
+	"github.com/valbaudo/aw/proc"
 	"github.com/valbaudo/aw/store"
 )
 
@@ -85,10 +85,9 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 		return aw.Result{}, err
 	}
 
-	cmd := exec.CommandContext(ctx, bin, "-p", prompt, "--model", model,
+	cmd := proc.Command(ctx, bin, "-p", prompt, "--model", model,
 		"--output-format", "json", "--dangerously-skip-permissions")
 	cmd.Dir = dir
-	cmd.Stdin = nil // claude -p drains caller stdin and hangs otherwise
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

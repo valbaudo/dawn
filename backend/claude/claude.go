@@ -10,10 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/valbaudo/aw"
+	"github.com/valbaudo/aw/proc"
 )
 
 // Backend runs one `claude -p --model <model> --output-format json` call. Model
@@ -68,8 +68,10 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 	if bin == "" {
 		bin = "claude"
 	}
-	cmd := exec.CommandContext(ctx, bin, "-p", prompt, "--model", model, "--output-format", "json")
-	cmd.Stdin = nil // claude -p drains caller stdin and hangs otherwise
+	// proc.Command, not exec.CommandContext: claude spawns tool subprocesses that
+	// inherit stdout, and killing only the direct child leaves the pipe open, so
+	// a timeout would hang instead of firing.
+	cmd := proc.Command(ctx, bin, "-p", prompt, "--model", model, "--output-format", "json")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

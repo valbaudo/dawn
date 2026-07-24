@@ -5,9 +5,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/valbaudo/aw/proc"
 )
 
 // EmptyTree is git's well-known sha for the empty tree. Diff from it to see a
@@ -130,7 +131,7 @@ func (t *Trees) env(workTree, index string) []string {
 }
 
 func git(ctx context.Context, dir string, env []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := proc.Command(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	var out bytes.Buffer

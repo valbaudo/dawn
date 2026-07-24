@@ -12,7 +12,8 @@ and everything else is plain code whose dependency arrows all point at `aw`.
 | Path | What | Depends on |
 |------|------|------------|
 | `aw.go` | core types + the `Backend` seam | nothing |
-| `store/` | content-addressed state: `Blobs` for bytes (`Mem`, durable `FS`), `Trees` for directories (git-backed) | nothing |
+| `proc/` | child processes whose whole group dies on cancel, so timeouts fire | nothing |
+| `store/` | content-addressed state: `Blobs` for bytes (`Mem`, durable `FS`), `Trees` for directories (git-backed) | `proc` |
 | `gate/` | judge / jury / k-of-N quorum / repair loop — a library, not an engine | `aw` |
 | `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures + materializes a tree | `aw`, `store` |
 | `plan/` | strict static-DAG runner: typed input wiring, no control flow, resume | `aw`, `store`, `yaml.v3` |
@@ -87,6 +88,11 @@ reply containing no JSON object is an error, never a placeholder value that flow
 downstream as data. Most review-gate implementations in the wild fail *open* (a
 broken reviewer lets the work through), which is a reasonable choice when a human
 is watching and the wrong one when nobody is.
+
+Timeouts have to actually fire, too. An agent CLI spawns tool subprocesses that
+inherit its stdout, so killing the CLI alone leaves the pipe open and a cancelled
+context turns into a hang that looks exactly like slow work. Every child runs in
+its own process group and cancellation signals the group.
 
 ## Not here yet
 
