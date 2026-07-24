@@ -88,39 +88,71 @@ concurrently inside the gate. If wall clock bites, `--jobs` is a *flag*, never a
 
 ---
 
-## 2 · Context — and why sessions are refused
+## 2 · Context — and why there is no session key
 
 **Default and only behavior: a fresh context for every invocation.** No key changes
-it. No inference from adjacency. **No session mechanism at all.**
+it. No inference from adjacency. **No session mechanism in the language.**
 
-Your intuition was that successive steps should implicitly resume one session,
-especially across fan-outs, to maximize caching. Rejected, on two fatal grounds and
-one that dissolves the motivation:
+Two arguments, both structural:
 
-1. **It kills the gate.** A judge inheriting the generator's transcript is not
-   independent — and it fails *silently*: the judge still returns `approved: true`,
-   so the run goes green while the differentiator is dead.
-2. **It makes a step's inputs undeclared.** Step 7 would depend on step 3 with no
-   edge in the DAG, which breaks rewind: replaying step 7 would mean reconstructing
-   a conversation the log never described.
-3. **The cache it buys does not exist.** Sessions and caches live four orders of
-   magnitude apart — a Claude Code transcript is retained ~30 days; an Anthropic
-   prompt cache is **5 minutes**. An overnight run resumes the session and misses
-   the cache 100% of the time.
-
-> **Sessions buy fidelity. Prefixes buy money. Never describe them as one mechanism.**
+1. **A session would kill the gate.** A judge inheriting the generator's transcript
+   is not independent — and it fails *silently*: the judge still returns
+   `approved: true`, so the run goes green while the differentiator is dead.
+2. **A session makes a step's inputs undeclared.** Step 7 would depend on step 3
+   with no edge in the DAG, which breaks rewind: replaying step 7 would mean
+   reconstructing a conversation the log never described.
 
 Because there is no session syntax anywhere, gate isolation is **structural, not
 enforced** — zero lines of validation. Honest scope: aw cannot see inside a
 black-box CLI. `claude -p` still loads `CLAUDE.md`, tools and cwd context every
 call. The property is exactly *"the judge did not see the generator's transcript."*
 
-**The one cache win aw can honestly claim** is inside the repair loop: every attempt
-starts from the same fixed invocation and the critique is **appended**, never
-prepended — same model, near-identical leading bytes, re-sent within seconds, inside
-the 5-minute TTL. No `cache:` knob: aw doesn't own the bytes that reach the provider.
-It ships ordering discipline plus `cache_read`/`cache_create` per step in the
-journal. **One measurement, no knob** — falsifiable, which a knob is not.
+### Caching is a prefix property, not a session property
+
+An earlier draft of this section claimed sessions and caches are incompatible on TTL
+grounds ("~30-day transcript vs 5-minute cache"). **That was wrong, and it was a
+category error** — retention governs whether a prefix can be *reconstructed*; TTL
+governs whether blocks are *resident*; the ratio is meaningless. Every hit also
+slides the TTL forward, so it is a *gap* budget, not a run budget, and Claude Code
+requests the 1-hour TTL on a subscription anyway.
+
+Measured on this machine ([docs/caching-measurements.md](docs/caching-measurements.md)):
+
+- Three **sessionless** calls with a stabilized prefix, three unrelated session ids:
+  `cache_read` 0 → **25,830** → **25,830**. The cache is keyed on the **exact token
+  prefix**, not on a conversation.
+- The same calls against Claude Code's **default** preset cache nothing of the
+  caller's content: the preset drifts a few tokens per run (env, cwd, git status),
+  exact prefix matching invalidates everything after the drift point, and
+  `cache_creation` stays at ~20.5k **every call**.
+- `--fork-session` inherits **no** cache (reproduced twice, tightly timed). Fan-out
+  off a warmed session is not a money lever.
+
+> **A session is a workaround for an unstable prefix, not the caching mechanism.**
+
+So the money lever is a **runtime** responsibility, not a language key:
+
+- **Stabilize the prefix.** Pass an explicit system prompt rather than inheriting a
+  drifting preset. Keep byte-identical leading content across invocations of the
+  same model.
+- **Order the prompt shared-content-first.** Bound scalar inputs are appended in
+  sorted order, and the folding must be deterministic — a Go map range over three
+  inputs measured **3 distinct hashes in 200 runs**, which silently defeats every
+  cache hit.
+- **In the repair loop, append the critique, never prepend it.** Same model,
+  near-identical leading bytes, re-sent within seconds.
+
+**Per-vendor caveat, because the answer is not uniform.** Anthropic, droid, goose
+and opencode key the cache on the prefix alone. **OpenAI's `codex` is the
+exception**: `codex-rs/core/src/client.rs` sets `prompt_cache_key` from the session
+id with no author-settable override, and `New | Cleared | Forked` all mint a fresh
+one — so back-to-back `codex exec` runs lose routing affinity and `codex exec
+resume` is the only handle. That is an **adapter** concern, handled behind the
+`aw.Backend` seam, not a key in the plan.
+
+**No `cache:` knob.** aw doesn't own the bytes that reach the provider. It ships
+ordering discipline plus `cache_read`/`cache_create` per step in the journal.
+**One measurement, no knob** — falsifiable, which a knob is not.
 
 ---
 
@@ -303,7 +335,8 @@ garbage), never a dangling pointer. The journal is also the event stream.
 
 ## 6 · Switching agents
 
-With sessions cut, **this question has no mechanism to refuse** — which is the point.
+With no session in the language, **this question has no mechanism to refuse** — which
+is the point.
 There is no native handle in the language, so there's nothing to mistranslate and no
 cross-vendor rule to write.
 
