@@ -86,7 +86,11 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 
 	output := map[string]any{"text": env.Result}
 	if in.Schema != nil {
-		output = extractJSON(env.Result)
+		parsed, err := extractJSON(env.Result)
+		if err != nil {
+			return aw.Result{}, err
+		}
+		output = parsed
 	}
 	return aw.Result{
 		Output: output,
@@ -100,20 +104,31 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 }
 
 // extractJSON pulls the first {...} object out of a model reply, tolerating code
-// fences and surrounding prose. Returns {"_unparsed": text} if none parses.
-func extractJSON(s string) map[string]any {
+// fences and surrounding prose. A reply that holds no JSON object is an ERROR,
+// never a value: returning a placeholder here (the old {"_unparsed": ...}) let a
+// refusal or a rate-limit message flow downstream as if it were data, where a
+// caller reading a missing field would score it as a legitimate answer.
+func extractJSON(s string) (map[string]any, error) {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "```json")
 	s = strings.TrimPrefix(s, "```")
 	if i := strings.IndexByte(s, '{'); i >= 0 {
 		if j := strings.LastIndexByte(s, '}'); j > i {
 			var m map[string]any
-			if json.Unmarshal([]byte(s[i:j+1]), &m) == nil {
-				return m
+			if err := json.Unmarshal([]byte(s[i:j+1]), &m); err == nil {
+				return m, nil
 			}
 		}
 	}
-	return map[string]any{"_unparsed": strings.TrimSpace(s)}
+	return nil, fmt.Errorf("claude: reply contained no JSON object: %s", elide(strings.TrimSpace(s), 200))
+}
+
+// elide shortens a string for an error message.
+func elide(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // compile-time assertion: Backend satisfies the aw.Backend seam.

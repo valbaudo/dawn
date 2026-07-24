@@ -1,0 +1,185 @@
+package store
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func trees(t *testing.T) *Trees {
+	t.Helper()
+	tr, err := NewTrees(filepath.Join(t.TempDir(), "cas"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tr
+}
+
+func writeFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// THE regression this store exists for: identical content must give an identical
+// ref regardless of mtime. The previous tar-based implementation failed this,
+// which meant "content-addressed" was not true.
+func TestCaptureIsContentAddressedNotTimeAddressed(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	capture := func(mt time.Time) string {
+		d := t.TempDir()
+		p := writeFile(t, d, "a.txt", "identical bytes\n")
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		ref, err := tr.Capture(ctx, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ref
+	}
+	older := capture(time.Unix(1000000000, 0))
+	newer := capture(time.Unix(1700000000, 0))
+	if older != newer {
+		t.Fatalf("identical bytes gave different refs: %s vs %s", older, newer)
+	}
+}
+
+func TestCaptureMaterializeRoundTrip(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	src := t.TempDir()
+	writeFile(t, src, "a.txt", "alpha\n")
+	writeFile(t, src, "sub/b.txt", "beta\n")
+
+	ref, err := tr.Capture(ctx, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, ref, dst); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"a.txt": "alpha\n", "sub/b.txt": "beta\n"} {
+		got, err := os.ReadFile(filepath.Join(dst, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// The tar implementation hard-failed on any symlink ("archive: write too long")
+// and dropped them on the way back out.
+func TestSymlinksRoundTrip(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	src := t.TempDir()
+	writeFile(t, src, "real.txt", "content\n")
+	if err := os.Symlink("real.txt", filepath.Join(src, "link.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	ref, err := tr.Capture(ctx, src)
+	if err != nil {
+		t.Fatalf("capture with a symlink failed: %v", err)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, ref, dst); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(filepath.Join(dst, "link.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("link.txt came back as a regular file, not a symlink")
+	}
+}
+
+// Two captures of the same tree dedup, and any two refs can be diffed against
+// each other (not just against an immediately preceding baseline).
+func TestDiffBetweenArbitraryRefs(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	d := t.TempDir()
+	writeFile(t, d, "calc.go", "func Add(a, b int) int { return a - b }\n")
+	v1, err := tr.Capture(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, d, "calc.go", "func Add(a, b int) int { return a + b }\n")
+	v2, err := tr.Capture(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, d, "calc_test.go", "func TestAdd(t *testing.T) {}\n")
+	v3, err := tr.Capture(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// v1 -> v3 spans both changes, which a baseline-only design cannot express.
+	diff, err := tr.Diff(ctx, v1, v3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff, "return a + b") || !strings.Contains(diff, "calc_test.go") {
+		t.Fatalf("v1..v3 diff should span both changes:\n%s", diff)
+	}
+	if v1 == v2 || v2 == v3 {
+		t.Fatal("distinct trees must have distinct refs")
+	}
+}
+
+// A .gitignore is honored, so a capture and a diff agree on what counts as
+// content (the tar version captured ignored junk the diff excluded).
+func TestCaptureHonorsGitignore(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	d := t.TempDir()
+	writeFile(t, d, ".gitignore", "junk/\n")
+	writeFile(t, d, "keep.txt", "keep\n")
+	writeFile(t, d, "junk/huge.bin", "ignore me\n")
+
+	ref, err := tr.Capture(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, ref, dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "junk", "huge.bin")); !os.IsNotExist(err) {
+		t.Fatal("ignored files must not enter the tree")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "keep.txt")); err != nil {
+		t.Fatal("tracked files must survive")
+	}
+}
+
+// A working dir that is itself a git repo must not leak its .git into the tree.
+func TestCaptureIgnoresNestedGitDir(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	d := t.TempDir()
+	writeFile(t, d, "a.txt", "alpha\n")
+	writeFile(t, d, ".git/HEAD", "ref: refs/heads/main\n")
+
+	ref, err := tr.Capture(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, ref, dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".git", "HEAD")); !os.IsNotExist(err) {
+		t.Fatal("a nested .git must not be captured as content")
+	}
+}

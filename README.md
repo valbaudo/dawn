@@ -12,7 +12,7 @@ and everything else is plain code whose dependency arrows all point at `aw`.
 | Path | What | Depends on |
 |------|------|------------|
 | `aw.go` | core types + the `Backend` seam | nothing |
-| `store/` | content-addressed `Blobs` (seam): `Mem` + durable `FS` | nothing |
+| `store/` | content-addressed state: `Blobs` for bytes (`Mem`, durable `FS`), `Trees` for directories (git-backed) | nothing |
 | `gate/` | judge / jury / k-of-N quorum / repair loop — a library, not an engine | `aw` |
 | `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures + materializes a tree | `aw`, `store` |
 | `plan/` | strict static-DAG runner: typed input wiring, no control flow, resume | `aw`, `store`, `yaml.v3` |
@@ -69,6 +69,24 @@ An invocation produces state refs (`Result.Produced`) and consumes them
 content-addressed `workspace` ref; a later invocation materializes that ref into
 a fresh dir and builds on it — so `repo@v1 → agent → repo@v2 → agent → repo@v3`
 flows with no shared mutable directory. `cmd/aw-chain` demonstrates it.
+
+A tree ref is a git tree sha, so identity really is the content: the same bytes
+captured on another day, by another user, on another machine give the same ref.
+Symlinks round-trip, the exec bit is normalized, identical blobs are stored once
+across versions, `.gitignore` is honored, and **any two captured refs diff
+directly** — not just consecutive ones. The working directory needs no `.git`;
+the store is the only repository involved.
+
+## What it refuses to do
+
+A judge that could not return a verdict has not voted. If an evaluator errors, or
+replies with prose instead of the requested JSON, `gate` surfaces a mechanical
+failure — it does not score it as a rejection, does not consume a repair attempt,
+and never reads it as approval. The same rule holds at the adapter boundary: a
+reply containing no JSON object is an error, never a placeholder value that flows
+downstream as data. Most review-gate implementations in the wild fail *open* (a
+broken reviewer lets the work through), which is a reasonable choice when a human
+is watching and the wrong one when nobody is.
 
 ## Not here yet
 

@@ -12,6 +12,7 @@ package gate
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/valbaudo/aw"
@@ -55,7 +56,18 @@ func Judge(ctx context.Context, judge aw.Backend, system, candidate string) Verd
 		v.Err = err
 		return v
 	}
-	v.Approved, _ = res.Output["approved"].(bool)
+	// A judge that did not return a usable verdict has not voted. Silently
+	// reading a missing or non-bool "approved" as false would turn a parse
+	// failure into a quality rejection: it would burn a repair attempt and
+	// terminate the gate with an empty critique, indistinguishable from a real
+	// bounded rejection. That is exactly the crash-becomes-verdict confusion
+	// this package exists to prevent, so it is an error, not a no.
+	approved, ok := res.Output["approved"].(bool)
+	if !ok {
+		v.Err = fmt.Errorf("judge %s: no boolean \"approved\" in verdict (got %v)", v.Judge, res.Output)
+		return v
+	}
+	v.Approved = approved
 	v.Reason, _ = res.Output["reason"].(string)
 	return v
 }

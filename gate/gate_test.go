@@ -75,3 +75,63 @@ func TestJuryErrorIsNotApproval(t *testing.T) {
 		t.Fatalf("errored judge must not be Approved")
 	}
 }
+
+// malformedJudge returns a well-formed Result whose Output has no usable
+// "approved" field — what a CLI adapter produces when the model replies with
+// prose (a refusal, a rate-limit notice, a chatty preamble).
+type malformedJudge struct {
+	name   string
+	output map[string]any
+}
+
+func (m malformedJudge) Name() string { return m.name }
+func (m malformedJudge) Invoke(context.Context, aw.Invocation) (aw.Result, error) {
+	return aw.Result{Output: m.output}, nil
+}
+
+// A judge that returned no usable verdict has NOT voted no. Reading a missing or
+// non-bool "approved" as false would silently convert a parse failure into a
+// quality rejection.
+func TestJudgeMalformedVerdictIsErrorNotRejection(t *testing.T) {
+	cases := map[string]map[string]any{
+		"missing approved":  {"reason": "I cannot help with that"},
+		"non-bool approved": {"approved": "yes", "reason": "stringly typed"},
+		"empty output":      {},
+	}
+	for name, out := range cases {
+		t.Run(name, func(t *testing.T) {
+			v := Judge(context.Background(), malformedJudge{"m", out}, "sys", "candidate")
+			if v.Err == nil {
+				t.Fatal("a malformed verdict must set Err, not vote no")
+			}
+			if v.Approved {
+				t.Fatal("a malformed verdict must never read as approval")
+			}
+		})
+	}
+}
+
+// The same failure inside a Gate must propagate as mechanical and leave the
+// repair budget untouched, rather than burning every attempt on a parse bug.
+func TestGateMalformedVerdictDoesNotBurnAttempts(t *testing.T) {
+	var generated []string
+	judges := []aw.Backend{
+		fakeJudge{name: "ok", approved: true},
+		malformedJudge{"chatty", map[string]any{"reason": "Sure! Here you go:"}},
+		fakeJudge{name: "ok2", approved: true},
+	}
+	gen := func(_ context.Context, feedback string) (string, error) {
+		generated = append(generated, feedback)
+		return "candidate", nil
+	}
+	out, err := Gate(context.Background(), gen, judges, "sys", Majority(3), 3)
+	if err == nil {
+		t.Fatal("a malformed verdict must surface as a mechanical failure")
+	}
+	if out.Approved {
+		t.Fatal("must not report approval")
+	}
+	if len(generated) != 1 {
+		t.Fatalf("a parse failure must not consume repair attempts, generated %d times", len(generated))
+	}
+}

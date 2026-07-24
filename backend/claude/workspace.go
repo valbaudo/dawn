@@ -14,22 +14,27 @@ import (
 )
 
 // Workspace is an [aw.Backend] that runs `claude -p` INSIDE a directory, letting
-// the agent edit files, then captures what changed as a unified git diff. The
-// diff is placed in Result.Output["diff"] so a gate can judge the change, and —
-// if Store is set — committed as a Produced "diff" artifact ref, so the change
-// is durable and content-addressed like any other state.
+// the agent edit files, and captures the result as a content-addressed tree ref.
 //
-// Dir must be a git working tree with at least one commit (HEAD must exist).
+// It snapshots the tree before and after the turn, so Result.Produced carries the
+// new workspace ref and Result.Output carries the diff between the two. Because
+// both are refs in the same [store.Trees], any two captured versions can be
+// diffed later, not just consecutive ones.
+//
+// The directory needs no .git of its own; the tree store is the only repository
+// involved. Either set Dir, or pass a workspace ref in Invocation.Inputs and the
+// backend materializes it into a fresh temp dir first, which is how repo@vN
+// reaches the next agent.
 //
 // SECURITY: editing files non-interactively requires --dangerously-skip-
-// permissions, which lets the agent modify anything under Dir. Point Workspace
-// only at a tree you are willing to let it change; the aw-fix demo uses a
-// throwaway temp repo it creates and deletes.
+// permissions, which lets the agent modify anything under the working dir. Point
+// Workspace only at a tree you are willing to let it change; the demos use a
+// throwaway temp dir they create and delete.
 type Workspace struct {
-	Dir   string      // git working tree the agent operates in
-	Model string      // default model; an Invocation may override
-	Bin   string      // defaults to "claude"
-	Store store.Blobs // optional: where the captured diff is committed
+	Dir   string       // working dir; empty means materialize from Inputs
+	Model string       // default model; an Invocation may override
+	Bin   string       // defaults to "claude"
+	Trees *store.Trees // required: where trees are captured and materialized
 }
 
 // Name reports the backend and its default model, e.g. "claude-ws:sonnet".
@@ -40,8 +45,11 @@ func (w Workspace) Name() string {
 	return "claude-ws"
 }
 
-// Invoke runs one editing turn and captures the resulting diff.
+// Invoke runs one editing turn and captures the resulting tree.
 func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error) {
+	if w.Trees == nil {
+		return aw.Result{}, fmt.Errorf("workspace: Trees is required")
+	}
 	model := in.Model
 	if model == "" {
 		model = w.Model
@@ -55,27 +63,32 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 		bin = "claude"
 	}
 
-	// Resolve the working tree: an explicit Dir, or materialize an input
-	// workspace ref into a fresh temp dir — this is how repo@vN reaches the
-	// next agent.
 	dir := w.Dir
 	if dir == "" {
 		ref, ok := workspaceInput(in.Inputs)
 		if !ok {
 			return aw.Result{}, fmt.Errorf("workspace: set Dir, or pass a workspace ref in Inputs to materialize")
 		}
-		d, cleanup, err := w.materialize(ctx, ref)
+		d, err := os.MkdirTemp("", "aw-ws-*")
 		if err != nil {
 			return aw.Result{}, err
 		}
-		defer cleanup()
+		defer os.RemoveAll(d) // the tree is captured below; the dir is scratch
+		if err := w.Trees.Materialize(ctx, ref.URI, d); err != nil {
+			return aw.Result{}, err
+		}
 		dir = d
+	}
+
+	base, err := w.Trees.Capture(ctx, dir)
+	if err != nil {
+		return aw.Result{}, err
 	}
 
 	cmd := exec.CommandContext(ctx, bin, "-p", prompt, "--model", model,
 		"--output-format", "json", "--dangerously-skip-permissions")
 	cmd.Dir = dir
-	cmd.Stdin = nil
+	cmd.Stdin = nil // claude -p drains caller stdin and hangs otherwise
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -89,40 +102,26 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 		return aw.Result{}, fmt.Errorf("claude: reported error: %s", env.Result)
 	}
 
-	diff, err := gitDiff(ctx, dir)
+	tree, err := w.Trees.Capture(ctx, dir)
 	if err != nil {
 		return aw.Result{}, err
 	}
-	res := aw.Result{
-		Output: map[string]any{"summary": env.Result, "diff": diff},
+	diff, err := w.Trees.Diff(ctx, base, tree)
+	if err != nil {
+		return aw.Result{}, err
+	}
+	return aw.Result{
+		Output: map[string]any{"summary": env.Result, "diff": diff, "base": base, "tree": tree},
 		Tokens: aw.Tokens{
 			Input:       env.Usage.InputTokens,
 			Output:      env.Usage.OutputTokens,
 			CacheRead:   env.Usage.CacheReadTokens,
 			CacheCreate: env.Usage.CacheCreationTokens,
 		},
-		Produced: map[string]aw.Ref{},
-	}
-	if w.Store != nil {
-		if diff != "" {
-			ref, err := w.Store.Put([]byte(diff))
-			if err != nil {
-				return aw.Result{}, fmt.Errorf("commit diff: %w", err)
-			}
-			res.Produced["diff"] = aw.Ref{Kind: aw.KindArtifact, URI: ref, Media: "text/x-diff"}
-		}
-		// Capture the resulting tree so it can be fed to the next invocation.
-		tree, err := tarTree(dir)
-		if err != nil {
-			return aw.Result{}, fmt.Errorf("capture workspace: %w", err)
-		}
-		wref, err := w.Store.Put(tree)
-		if err != nil {
-			return aw.Result{}, fmt.Errorf("commit workspace: %w", err)
-		}
-		res.Produced["workspace"] = aw.Ref{Kind: aw.KindWorkspace, URI: wref, Media: "application/x-tar+gzip"}
-	}
-	return res, nil
+		Produced: map[string]aw.Ref{
+			"workspace": {Kind: aw.KindWorkspace, URI: tree, Media: "application/vnd.git-tree"},
+		},
+	}, nil
 }
 
 // workspaceInput returns the first workspace-kind ref in inputs, if any.
@@ -133,67 +132,6 @@ func workspaceInput(inputs map[string]aw.Ref) (aw.Ref, bool) {
 		}
 	}
 	return aw.Ref{}, false
-}
-
-// Materialize writes a stored workspace ref (a gzip'd tar captured when a
-// Workspace invocation snapshotted its tree) into dir. Exposed so a caller can
-// inspect or reuse a captured workspace outside a backend run.
-func Materialize(b store.Blobs, ref aw.Ref, dir string) error {
-	data, err := b.Get(ref.URI)
-	if err != nil {
-		return fmt.Errorf("materialize: %w", err)
-	}
-	return untarTree(data, dir)
-}
-
-// materialize writes a workspace ref into a fresh temp dir and gives it a
-// baseline git commit, so the agent edits repo@vN and gitDiff has a HEAD to diff
-// against. The caller must invoke cleanup when done.
-func (w Workspace) materialize(ctx context.Context, ref aw.Ref) (dir string, cleanup func(), err error) {
-	if w.Store == nil {
-		return "", nil, fmt.Errorf("workspace: Store required to materialize an input")
-	}
-	dir, err = os.MkdirTemp("", "aw-ws-*")
-	if err != nil {
-		return "", nil, err
-	}
-	cleanup = func() { _ = os.RemoveAll(dir) }
-	if err := Materialize(w.Store, ref, dir); err != nil {
-		cleanup()
-		return "", nil, err
-	}
-	for _, args := range [][]string{
-		{"init", "-q"}, {"config", "user.email", "aw@example.com"},
-		{"config", "user.name", "aw"}, {"add", "-A"}, {"commit", "-qm", "baseline"},
-	} {
-		if out, e := gitCmd(ctx, dir, args...); e != nil {
-			cleanup()
-			return "", nil, fmt.Errorf("materialize baseline git %v: %v: %s", args, e, out)
-		}
-	}
-	return dir, cleanup, nil
-}
-
-// gitDiff stages every change (so new and deleted files also appear) and returns
-// the unified diff against HEAD. An empty string means the agent changed nothing.
-func gitDiff(ctx context.Context, dir string) (string, error) {
-	if out, err := gitCmd(ctx, dir, "add", "-A"); err != nil {
-		return "", fmt.Errorf("git add: %w: %s", err, out)
-	}
-	out, err := gitCmd(ctx, dir, "diff", "--cached")
-	if err != nil {
-		return "", fmt.Errorf("git diff: %w: %s", err, out)
-	}
-	return out, nil
-}
-
-func gitCmd(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	err := cmd.Run()
-	return out.String(), err
 }
 
 var _ aw.Backend = Workspace{}
