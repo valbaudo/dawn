@@ -48,6 +48,14 @@ func (b *FS) Put(content []byte) (string, error) {
 		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("store: write: %w", err)
 	}
+	// Flush to disk BEFORE the rename. Without this the rename can land while
+	// the content is still in the page cache, so a power loss leaves a
+	// correctly-named file full of zeros — a committed ref pointing at nothing.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("store: sync: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("store: close: %w", err)
@@ -55,6 +63,11 @@ func (b *FS) Put(content []byte) (string, error) {
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("store: commit: %w", err)
+	}
+	// And fsync the directory, so the rename itself survives a power loss.
+	if dir, err := os.Open(b.root); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return ref, nil
 }

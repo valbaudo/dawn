@@ -120,9 +120,9 @@ func TestGateMalformedVerdictDoesNotBurnAttempts(t *testing.T) {
 		malformedJudge{"chatty", map[string]any{"reason": "Sure! Here you go:"}},
 		fakeJudge{name: "ok2", approved: true},
 	}
-	gen := func(_ context.Context, feedback string) (string, error) {
+	gen := func(_ context.Context, feedback string) (Candidate, error) {
 		generated = append(generated, feedback)
-		return "candidate", nil
+		return Text("candidate"), nil
 	}
 	out, err := Gate(context.Background(), gen, judges, "sys", Majority(3), 3)
 	if err == nil {

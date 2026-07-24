@@ -36,6 +36,23 @@ type Step struct {
 	Needs  []string          `yaml:"needs,omitempty"`
 	Inputs map[string]Source `yaml:"inputs,omitempty"` // name -> source
 	Output string            `yaml:"output,omitempty"` // typed field to extract; "" => raw text
+	Gate   *Gate             `yaml:"gate,omitempty"`   // optional acceptance check
+}
+
+// Gate configures an independent acceptance check on a step. It is DATA, not
+// control flow: the author writes no branch, no condition and no loop variable.
+// The loop lives inside the gate library and this only configures it, the same
+// way `retries: 3` configures a CI runner. That is why it does not violate the
+// format's no-control-flow rule.
+//
+// A step whose gate does not reach quorum within Attempts FAILS. In an
+// unattended run that is the point: nothing downstream should proceed on work
+// the panel refused.
+type Gate struct {
+	Judges   []string `yaml:"judges"`             // agent names that vote
+	Criteria string   `yaml:"criteria"`           // what the judges must check
+	Quorum   int      `yaml:"quorum,omitempty"`   // approvals needed; default majority
+	Attempts int      `yaml:"attempts,omitempty"` // bounded repair attempts; default 3
 }
 
 // Source is a typed reference to another step's output: "steps.<id>.<field>".
@@ -82,6 +99,23 @@ func (p *Plan) validate() error {
 		}
 		if _, ok := p.Agents[s.Agent]; !ok {
 			return fmt.Errorf("step %q: unknown agent %q", s.ID, s.Agent)
+		}
+		if g := s.Gate; g != nil {
+			switch {
+			case len(g.Judges) == 0:
+				return fmt.Errorf("step %q: gate needs at least one judge", s.ID)
+			case g.Criteria == "":
+				return fmt.Errorf("step %q: gate needs criteria", s.ID)
+			case g.Quorum < 0 || g.Quorum > len(g.Judges):
+				return fmt.Errorf("step %q: gate quorum %d out of range for %d judges", s.ID, g.Quorum, len(g.Judges))
+			case g.Attempts < 0:
+				return fmt.Errorf("step %q: gate attempts must not be negative", s.ID)
+			}
+			for _, j := range g.Judges {
+				if _, ok := p.Agents[j]; !ok {
+					return fmt.Errorf("step %q: gate names unknown judge agent %q", s.ID, j)
+				}
+			}
 		}
 		seen[s.ID] = true
 	}

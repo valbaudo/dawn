@@ -198,7 +198,7 @@ func demo(args []string) {
 		if err != nil {
 			fatal(err)
 		}
-		candidate, approved, votes = out.Candidate, out.Approved, out.Votes
+		candidate, approved, votes = out.Candidate.Text, out.Approved, out.Votes
 		fmt.Printf("  settled on attempt %d of %d\n", out.Attempts, maxAttempts)
 	}
 
@@ -218,7 +218,7 @@ func demo(args []string) {
 }
 
 func generator(model string) gate.Generate {
-	return func(ctx context.Context, feedback string) (string, error) {
+	return func(ctx context.Context, feedback string) (gate.Candidate, error) {
 		prompt := "Write a three-sentence release note for a new `aw run --json` flag that streams machine-readable events."
 		if feedback != "" {
 			prompt += "\n\n" + feedback
@@ -233,13 +233,12 @@ func generator(model string) gate.Generate {
 			},
 		})
 		if err != nil {
-			return "", err
+			return gate.Candidate{}, err
 		}
 		if s, ok := res.Output["release_note"].(string); ok && s != "" {
-			return s, nil
+			return gate.FromResult(res, "release_note"), nil
 		}
-		s, _ := res.Output["text"].(string)
-		return s, nil
+		return gate.FromResult(res, "text"), nil
 	}
 }
 

@@ -4,16 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/valbaudo/aw"
+	"github.com/valbaudo/aw/gate"
 	"github.com/valbaudo/aw/store"
 )
 
-// StepResult is a committed step: its typed output and the store ref that output
-// was content-addressed to. Resume reloads these from the store — nothing else.
+// StepResult is a committed step: its typed output, any state refs it produced,
+// and the store ref that record was content-addressed to. Resume reloads these
+// from the store — nothing else.
 type StepResult struct {
-	Output map[string]any
-	Ref    string
+	Output   map[string]any
+	Produced map[string]aw.Ref
+	Ref      string
+}
+
+// stepBlob is the committed record. Produced travels with Output so a resumed
+// run can still hand a workspace ref to the next step; committing only the
+// scalars would silently break the chain on restart.
+type stepBlob struct {
+	Output   map[string]any    `json:"output"`
+	Produced map[string]aw.Ref `json:"produced,omitempty"`
 }
 
 // Runner executes a Plan. Backend maps an agent spec to a concrete aw.Backend,
@@ -26,9 +38,9 @@ type Runner struct {
 }
 
 // Run executes every step in dependency order, skipping any already present in
-// done (resume), and returns the full result set. Each step's typed output is
+// done (resume), and returns the full result set. Each step's record is
 // committed to Blobs before the next step runs, so a crash loses only the
-// in-flight step; on the returned map even a partial run is resumable.
+// in-flight step.
 func (r *Runner) Run(ctx context.Context, p *Plan, done map[string]StepResult) (map[string]StepResult, error) {
 	order, err := p.order()
 	if err != nil {
@@ -61,20 +73,27 @@ func (r *Runner) runStep(ctx context.Context, p *Plan, s Step, done map[string]S
 	if err != nil {
 		return StepResult{}, err
 	}
-	// Materialize typed inputs as labeled blocks appended to the prompt. This is
-	// reference resolution, not string interpolation: the author writes a plain
-	// prompt and names inputs; the runner attaches the resolved values.
+
+	// Resolve declared inputs. A state ref (a workspace, an artifact) travels as
+	// a REF, so the backend materializes it properly; only a scalar is rendered
+	// into the prompt, because that is the only kind a model can read directly.
 	prompt := s.Prompt
+	inputs := map[string]aw.Ref{}
 	for name, src := range s.Inputs {
 		did, field, _ := parseFrom(src.From)
-		v, ok := done[did].Output[field]
+		up := done[did]
+		if ref, ok := up.Produced[field]; ok {
+			inputs[name] = ref
+			continue
+		}
+		v, ok := up.Output[field]
 		if !ok {
-			return StepResult{}, fmt.Errorf("input %q: step %q has no field %q", name, did, field)
+			return StepResult{}, fmt.Errorf("input %q: step %q produced no %q", name, did, field)
 		}
 		prompt += fmt.Sprintf("\n\n--- input: %s ---\n%v", name, v)
 	}
 
-	inv := aw.Invocation{Prompt: prompt}
+	inv := aw.Invocation{Prompt: prompt, Inputs: inputs}
 	if s.Output != "" {
 		inv.Schema = map[string]any{
 			"type": "object", "additionalProperties": false,
@@ -82,12 +101,19 @@ func (r *Runner) runStep(ctx context.Context, p *Plan, s Step, done map[string]S
 			"properties": map[string]any{s.Output: map[string]any{"type": "string"}},
 		}
 	}
-	r.logf("run  %s (%s)", s.ID, backend.Name())
-	res, err := backend.Invoke(ctx, inv)
+
+	var res aw.Result
+	if s.Gate == nil {
+		r.logf("run  %s (%s)", s.ID, backend.Name())
+		res, err = backend.Invoke(ctx, inv)
+	} else {
+		res, err = r.runGated(ctx, p, s, backend, inv)
+	}
 	if err != nil {
 		return StepResult{}, err
 	}
-	blob, err := json.Marshal(res.Output)
+
+	blob, err := json.Marshal(stepBlob{Output: res.Output, Produced: res.Produced})
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -95,7 +121,79 @@ func (r *Runner) runStep(ctx context.Context, p *Plan, s Step, done map[string]S
 	if err != nil {
 		return StepResult{}, err
 	}
-	return StepResult{Output: res.Output, Ref: ref}, nil
+	return StepResult{Output: res.Output, Produced: res.Produced, Ref: ref}, nil
+}
+
+// runGated generates, submits the result to an independent panel, and repairs
+// from the critique until quorum or the attempt bound. A gate that never reaches
+// quorum fails the step rather than passing the work through.
+func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backend, inv aw.Invocation) (aw.Result, error) {
+	g := s.Gate
+	judges := make([]aw.Backend, 0, len(g.Judges))
+	for _, name := range g.Judges {
+		b, err := r.Backend(p.Agents[name])
+		if err != nil {
+			return aw.Result{}, err
+		}
+		judges = append(judges, b)
+	}
+	quorum := g.Quorum
+	if quorum == 0 {
+		quorum = gate.Majority(len(judges))
+	}
+	attempts := g.Attempts
+	if attempts == 0 {
+		attempts = 3
+	}
+	field := s.Output
+	if field == "" {
+		field = "text"
+	}
+
+	r.logf("run  %s (%s) + gate: %d judges, quorum %d, up to %d attempts",
+		s.ID, backend.Name(), len(judges), quorum, attempts)
+
+	var accepted aw.Result
+	gen := func(ctx context.Context, feedback string) (gate.Candidate, error) {
+		attempt := inv
+		if feedback != "" {
+			attempt.Prompt = inv.Prompt + "\n\n" + feedback
+		}
+		res, err := backend.Invoke(ctx, attempt)
+		if err != nil {
+			return gate.Candidate{}, err
+		}
+		accepted = res // Gate returns at the first pass, so this is the accepted one
+		return gate.FromResult(res, field), nil
+	}
+
+	out, err := gate.Gate(ctx, gen, judges, g.Criteria, quorum, attempts)
+	if err != nil {
+		return aw.Result{}, err
+	}
+	if !out.Approved {
+		return aw.Result{}, fmt.Errorf("gate rejected after %d attempt(s): %s", out.Attempts, objections(out.Votes))
+	}
+	r.logf("     gate passed on attempt %d", out.Attempts)
+	return accepted, nil
+}
+
+// objections summarizes why a panel refused, for the step's error.
+func objections(votes []gate.Verdict) string {
+	var b strings.Builder
+	for _, v := range votes {
+		if v.Approved || v.Reason == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("; ")
+		}
+		fmt.Fprintf(&b, "%s: %s", v.Judge, v.Reason)
+	}
+	if b.Len() == 0 {
+		return "no reasons given"
+	}
+	return b.String()
 }
 
 // Reload rebuilds committed results from an id->ref map by reading each ref back
@@ -107,11 +205,11 @@ func Reload(b store.Blobs, refs map[string]string) (map[string]StepResult, error
 		if err != nil {
 			return nil, fmt.Errorf("reload %q: %w", id, err)
 		}
-		var o map[string]any
-		if err := json.Unmarshal(content, &o); err != nil {
+		var blob stepBlob
+		if err := json.Unmarshal(content, &blob); err != nil {
 			return nil, fmt.Errorf("reload %q: %w", id, err)
 		}
-		out[id] = StepResult{Output: o, Ref: ref}
+		out[id] = StepResult{Output: blob.Output, Produced: blob.Produced, Ref: ref}
 	}
 	return out, nil
 }

@@ -34,6 +34,7 @@ Uses your local Claude Code login (no API key):
 go test ./...                                  # deterministic; no network
 go run ./cmd/aw demo                            # generate -> 3-model jury -> repair
 go run ./cmd/aw demo "One sentence. Two sentence. Three. Four."   # watch the jury reject
+go run ./cmd/aw run examples/gated.yaml          # a gated step: draft -> 3-model panel -> repair
 go run ./cmd/aw run examples/pipeline.yaml --store .aw --state run.json
 go run ./cmd/aw run examples/pipeline.yaml --store .aw --state run.json   # re-run: skips committed steps
 go run ./cmd/aw-fix                             # claude fixes a bug; jury judges the diff
@@ -44,6 +45,30 @@ go run ./cmd/aw-chain                           # fix a repo, feed repo@v2 to a 
 
 Strict and control-flow-free: steps are wired by TYPED references, never string
 templating, and any unknown key (`if:`, `loop:`, `map:`) is a parse error.
+
+A step can declare a `gate:` — an independent panel that has to agree before the
+step commits. That is data, not control flow: no branch, no loop variable. The
+loop lives in the runtime and this configures it, the way `retries: 3` configures
+a CI job. A panel that never reaches quorum **fails the step**, so nothing
+downstream runs on work it refused.
+
+```yaml
+steps:
+  - id: release_note
+    agent: writer
+    prompt: Write a three-sentence release note for the new --json flag.
+    output: text
+    gate:
+      judges: [haiku, sonnet, opus]   # different models, independent votes
+      quorum: 2                        # default: majority, ties reject
+      attempts: 3                      # bounded repair on rejection
+      criteria: Approve ONLY if it is exactly three sentences.
+```
+
+Inputs resolve by kind: a state ref (a workspace, an artifact) travels as a ref
+into the next invocation and is materialized by the backend, while a scalar is
+rendered into the prompt. Both survive a checkpoint, so a resumed run can still
+hand a workspace to the next step.
 
 ```yaml
 version: 1

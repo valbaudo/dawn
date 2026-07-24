@@ -29,13 +29,18 @@ func threeContentJudges() []aw.Backend {
 // recording the feedback it was handed on each call.
 func scripted(seen *[]string, seq ...string) Generate {
 	i := 0
-	return func(_ context.Context, feedback string) (string, error) {
+	return func(_ context.Context, feedback string) (Candidate, error) {
 		*seen = append(*seen, feedback)
 		s := seq[i]
 		if i < len(seq)-1 {
 			i++
 		}
-		return s, nil
+		// Each attempt carries a ref named after its own text, so a test can
+		// tell WHICH attempt's artifact came back in the outcome.
+		return Candidate{
+			Text:     s,
+			Produced: map[string]aw.Ref{"workspace": {Kind: aw.KindWorkspace, URI: "tree-" + s}},
+		}, nil
 	}
 }
 
@@ -88,7 +93,7 @@ func TestGateExhaustsIsBoundedRejection(t *testing.T) {
 }
 
 func TestGateGenerateErrorPropagates(t *testing.T) {
-	gen := func(context.Context, string) (string, error) { return "", errors.New("gen boom") }
+	gen := func(context.Context, string) (Candidate, error) { return Candidate{}, errors.New("gen boom") }
 	_, err := Gate(context.Background(), gen, threeContentJudges(), "sys", Majority(3), 3)
 	if err == nil {
 		t.Fatal("a generator failure must propagate, not be swallowed")
@@ -114,5 +119,30 @@ func TestGateJudgeErrorIsMechanicalNotRejection(t *testing.T) {
 	}
 	if len(fb) != 1 {
 		t.Fatalf("mechanical failure must not consume repair attempts, generated %d times", len(fb))
+	}
+}
+
+// The point of Candidate carrying refs: after a repair loop, the caller can
+// recover the artifact the ACCEPTED attempt produced. Before this, Outcome held
+// only a string and the accepted repo@vN was unrecoverable.
+func TestGateReturnsAcceptedAttemptsArtifact(t *testing.T) {
+	var fb []string
+	out, err := Gate(context.Background(), scripted(&fb, "a bad draft", "a good draft"),
+		threeContentJudges(), "sys", Majority(3), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Approved || out.Attempts != 2 {
+		t.Fatalf("expected approval on attempt 2, got %+v", out)
+	}
+	ref, ok := out.Candidate.Produced["workspace"]
+	if !ok {
+		t.Fatal("outcome dropped the accepted attempt's state refs")
+	}
+	if ref.URI != "tree-a good draft" {
+		t.Fatalf("got the wrong attempt's artifact: %q (rejected attempt 1 leaked through)", ref.URI)
+	}
+	if ref.Kind != aw.KindWorkspace {
+		t.Fatalf("ref kind = %q", ref.Kind)
 	}
 }
