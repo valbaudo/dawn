@@ -60,7 +60,7 @@ var twoStep = &Plan{
 func TestRunWiresTypedInputs(t *testing.T) {
 	var calls int
 	r, _ := runner(&calls)
-	done, err := r.Run(context.Background(), twoStep, nil)
+	done, err := r.Run(context.Background(), twoStep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,26 +77,34 @@ func TestRunWiresTypedInputs(t *testing.T) {
 	}
 }
 
-func TestResumeSkipsCommittedSteps(t *testing.T) {
-	var calls int
-	r, blobs := runner(&calls)
-	done, err := r.Run(context.Background(), twoStep, nil)
+// Re-running the same command IS the resume: no mode, no flag, one code path.
+func TestReRunningSkipsCommittedSteps(t *testing.T) {
+	dir := t.TempDir()
+	blobs, err := store.NewFS(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// simulate a fresh process: rebuild done from the committed refs, then re-run.
-	reloaded, err := Reload(blobs, Refs(done))
+	j, err := OpenJournal(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var calls int
+	mk := func() *Runner {
+		return &Runner{Blobs: blobs, Journal: j,
+			Backend: func(Agent) (aw.Backend, error) { return echoBackend{&calls}, nil }}
+	}
+	if _, err := mk().Run(context.Background(), twoStep); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("first run should execute both steps, got %d", calls)
 	}
 	calls = 0
-	r2, _ := runner(&calls)
-	r2.Blobs = blobs
-	if _, err := r2.Run(context.Background(), twoStep, reloaded); err != nil {
+	if _, err := mk().Run(context.Background(), twoStep); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 0 {
-		t.Fatalf("resume must skip committed steps, but ran %d", calls)
+		t.Fatalf("a second run with no edits must do zero paid work, ran %d", calls)
 	}
 }
 

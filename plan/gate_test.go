@@ -2,6 +2,7 @@ package plan
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -83,7 +84,7 @@ func TestGatedStepPasses(t *testing.T) {
 		"yes2": voter{name: "b", approve: true}, "no": voter{name: "c", approve: false},
 	})}
 	p := gatedPlan(&Gate{Judges: []string{"a", "b", "c"}, Criteria: "be good"})
-	done, err := r.Run(context.Background(), p, nil)
+	done, err := r.Run(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +101,7 @@ func TestGatedStepFailsClosed(t *testing.T) {
 		"yes2": voter{name: "b", approve: false}, "no": voter{name: "c", approve: false},
 	})}
 	p := gatedPlan(&Gate{Judges: []string{"a", "b", "c"}, Criteria: "be good", Attempts: 2})
-	_, err := r.Run(context.Background(), p, nil)
+	_, err := r.Run(context.Background(), p)
 	if err == nil {
 		t.Fatal("a rejected gate must fail the step, not pass it through")
 	}
@@ -119,7 +120,7 @@ func TestGatedStepRepairs(t *testing.T) {
 		"no":   voter{name: "c", flipAfter: 1, seen: &votes},
 	})}
 	p := gatedPlan(&Gate{Judges: []string{"a", "b", "c"}, Criteria: "be good", Attempts: 3})
-	done, err := r.Run(context.Background(), p, nil)
+	done, err := r.Run(context.Background(), p)
 	if err != nil {
 		t.Fatalf("the gate should have accepted the repaired attempt: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestRefInputsTravelAsRefs(t *testing.T) {
 				}},
 		},
 	}
-	if _, err := r.Run(context.Background(), p, nil); err != nil {
+	if _, err := r.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if len(seen) != 2 {
@@ -169,27 +170,37 @@ func TestRefInputsTravelAsRefs(t *testing.T) {
 	}
 }
 
-// Produced refs must survive a checkpoint: committing only the scalars would
-// silently break a workspace chain on resume.
-func TestProducedRefsSurviveResume(t *testing.T) {
-	blobs := store.NewMem()
-	r := &Runner{Blobs: blobs, Backend: byModel(map[string]aw.Backend{"gen": producer{}})}
+// Produced refs must survive a commit: recording only the scalars would silently
+// break a workspace chain on the next run.
+func TestProducedRefsSurviveACommit(t *testing.T) {
+	dir := t.TempDir()
+	blobs, err := store.NewFS(filepath.Join(dir, "blobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := &Plan{
 		Version: 1,
 		Agents:  map[string]Agent{"w": {Backend: "x", Model: "gen"}},
 		Steps:   []Step{{ID: "first", Agent: "w", Prompt: "make it", Output: map[string]Type{"text": {}}}},
 	}
-	done, err := r.Run(context.Background(), p, nil)
+	mk := func() *Runner {
+		return &Runner{Blobs: blobs, Journal: j, Backend: byModel(map[string]aw.Backend{"gen": producer{}})}
+	}
+	if _, err := mk().Run(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	// a second process reads it back purely from the journal + store
+	done, err := mk().Run(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reloaded, err := Reload(blobs, Refs(done))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ref, ok := reloaded["first"].Produced["workspace"]
+	ref, ok := done["first"].Produced["workspace"]
 	if !ok {
-		t.Fatal("resume dropped the step's produced refs")
+		t.Fatal("the committed record dropped the step's produced refs")
 	}
 	if ref.URI != "tree-abc" {
 		t.Fatalf("ref did not round-trip: %+v", ref)
@@ -244,7 +255,7 @@ func TestInputFoldIsDeterministic(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		var seen []aw.Invocation
 		r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]aw.Backend{"gen": producer{seen: &seen}})}
-		if _, err := r.Run(context.Background(), p, nil); err != nil {
+		if _, err := r.Run(context.Background(), p); err != nil {
 			t.Fatal(err)
 		}
 		got := seen[len(seen)-1].Prompt // the sink step

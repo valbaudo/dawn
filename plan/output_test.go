@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func load(t *testing.T, yaml string) (*Plan, error) {
+func loadPlan(t *testing.T, yaml string) (*Plan, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "p.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
@@ -22,7 +22,7 @@ const head = "version: 1\nagents:\n  w: {backend: claude, model: sonnet}\nsteps:
 // declare fails before a token is spent. Without typed output this was a runtime
 // lookup, i.e. a 3am failure after paying for step 1.
 func TestReferenceToUndeclaredFieldIsALoadError(t *testing.T) {
-	_, err := load(t, head+
+	_, err := loadPlan(t, head+
 		"  - id: a\n    agent: w\n    prompt: x\n    output: {summary: string}\n"+
 		"  - id: b\n    agent: w\n    prompt: y\n    inputs: {s: steps.a.sevrty}\n")
 	if err == nil {
@@ -37,7 +37,7 @@ func TestReferenceToUndeclaredFieldIsALoadError(t *testing.T) {
 }
 
 func TestReferenceToDeclaredFieldLoads(t *testing.T) {
-	if _, err := load(t, head+
+	if _, err := loadPlan(t, head+
 		"  - id: a\n    agent: w\n    prompt: x\n    output: {summary: string}\n"+
 		"  - id: b\n    agent: w\n    prompt: y\n    inputs: {s: steps.a.summary}\n"); err != nil {
 		t.Fatal(err)
@@ -47,12 +47,12 @@ func TestReferenceToDeclaredFieldLoads(t *testing.T) {
 // A step that declares no output implicitly declares {text: string}, so a
 // reference to .text resolves.
 func TestDefaultOutputIsText(t *testing.T) {
-	if _, err := load(t, head+
+	if _, err := loadPlan(t, head+
 		"  - id: a\n    agent: w\n    prompt: x\n"+
 		"  - id: b\n    agent: w\n    prompt: y\n    inputs: {s: steps.a.text}\n"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := load(t, head+
+	if _, err := loadPlan(t, head+
 		"  - id: a\n    agent: w\n    prompt: x\n"+
 		"  - id: b\n    agent: w\n    prompt: y\n    inputs: {s: steps.a.nope}\n"); err == nil {
 		t.Fatal("only .text exists by default")
@@ -61,19 +61,19 @@ func TestDefaultOutputIsText(t *testing.T) {
 
 // A workspace step's auto-produced names may be referenced but never declared.
 func TestReservedNames(t *testing.T) {
-	if _, err := load(t, head+
+	if _, err := loadPlan(t, head+
 		"  - id: a\n    agent: w\n    prompt: x\n"+
 		"  - id: b\n    agent: w\n    prompt: y\n    inputs: {r: steps.a.workspace}\n"); err != nil {
 		t.Fatalf("referencing a reserved name must be allowed: %v", err)
 	}
-	_, err := load(t, head+"  - id: a\n    agent: w\n    prompt: x\n    output: {workspace: string}\n")
+	_, err := loadPlan(t, head+"  - id: a\n    agent: w\n    prompt: x\n    output: {workspace: string}\n")
 	if err == nil || !strings.Contains(err.Error(), "reserved") {
 		t.Fatalf("declaring a reserved name must fail, got: %v", err)
 	}
 }
 
 func TestTypeForms(t *testing.T) {
-	p, err := load(t, head+"  - id: a\n    agent: w\n    prompt: x\n    output:\n      s: string\n      u: [low, high]\n")
+	p, err := loadPlan(t, head+"  - id: a\n    agent: w\n    prompt: x\n    output:\n      s: string\n      u: [low, high]\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestTypeForms(t *testing.T) {
 		"scalar sugar":    "  - id: a\n    agent: w\n    prompt: x\n    output: text\n",
 	} {
 		t.Run("rejects "+name, func(t *testing.T) {
-			if _, err := load(t, head+y); err == nil {
+			if _, err := loadPlan(t, head+y); err == nil {
 				t.Fatal("expected a parse error")
 			}
 		})

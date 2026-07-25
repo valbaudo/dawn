@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -14,96 +15,164 @@ import (
 )
 
 // StepResult is a committed step: its typed output, any state refs it produced,
-// and the store ref that record was content-addressed to. Resume reloads these
-// from the store — nothing else.
+// and the store ref that record was content-addressed to.
 type StepResult struct {
 	Output   map[string]any
 	Produced map[string]aw.Ref
 	Ref      string
 }
 
-// stepBlob is the committed record. Produced travels with Output so a resumed
-// run can still hand a workspace ref to the next step; committing only the
-// scalars would silently break the chain on restart.
+// stepBlob is the committed record. Produced travels with Output so a later run
+// can still hand a workspace ref to the next step; committing only the scalars
+// would silently break the chain.
 type stepBlob struct {
 	Output   map[string]any    `json:"output"`
 	Produced map[string]aw.Ref `json:"produced,omitempty"`
 }
 
-// Runner executes a Plan. Backend maps an agent spec to a concrete aw.Backend,
-// so the runner stays backend-agnostic — the caller decides that "claude" means
-// claude.Backend, keeping this package free of any backend dependency.
-type Runner struct {
-	Blobs   store.Blobs
-	Backend func(Agent) (aw.Backend, error)
-	Log     func(format string, args ...any) // optional progress; nil is fine
+// RejectedError is a panel refusing the work — a legitimate outcome, not a
+// malfunction. It is distinguished from a mechanical failure so a caller can exit
+// differently: in an unattended run, "the panel refused" and "the machine broke"
+// need different responses.
+type RejectedError struct {
+	Step       string
+	Attempts   int
+	Objections string
 }
 
-// Run executes every step in dependency order, skipping any already present in
-// done (resume), and returns the full result set. Each step's record is
-// committed to Blobs before the next step runs, so a crash loses only the
-// in-flight step.
-func (r *Runner) Run(ctx context.Context, p *Plan, done map[string]StepResult) (map[string]StepResult, error) {
+func (e *RejectedError) Error() string {
+	return fmt.Sprintf("gate refused after %d attempt(s): %s", e.Attempts, e.Objections)
+}
+
+// Runner executes a Plan. Backend maps an agent spec to a concrete aw.Backend, so
+// the runner stays backend-agnostic.
+type Runner struct {
+	Blobs   store.Blobs
+	Journal *Journal        // optional; nil means never reuse and never record
+	Redo    map[string]bool // step ids to re-run even on a hit, this run only
+	Backend func(Agent) (aw.Backend, error)
+	Log     func(format string, args ...any)
+}
+
+// Run executes the plan in dependency order, reusing any step whose identity key
+// the journal already holds an accepted result for.
+//
+// There is no resume mode and no resume flag: re-running the same command IS the
+// resume, so the recovery path is the normal path and gets exercised every run.
+func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error) {
 	order, err := p.order()
 	if err != nil {
-		return done, err
-	}
-	if done == nil {
-		done = map[string]StepResult{}
+		return nil, err
 	}
 	idx := make(map[string]Step, len(p.Steps))
 	for _, s := range p.Steps {
 		idx[s.ID] = s
 	}
+	done := map[string]StepResult{}
+
 	for _, id := range order {
-		if res, ok := done[id]; ok {
-			r.logf("skip %s (committed %s)", id, short(res.Ref))
-			continue
-		}
-		res, err := r.runStep(ctx, p, idx[id], done)
+		s := idx[id]
+		bound, err := r.bind(s, done)
 		if err != nil {
 			return done, fmt.Errorf("step %q: %w", id, err)
 		}
+		key, err := s.Key(p.Agents[s.Agent], bound.key)
+		if err != nil {
+			return done, fmt.Errorf("step %q: %w", id, err)
+		}
+
+		if r.Journal != nil && !r.Redo[id] {
+			if ref, ok := r.Journal.Lookup(key); ok {
+				rec, err := load(r.Blobs, ref)
+				if err != nil {
+					return done, fmt.Errorf("step %q: %w", id, err)
+				}
+				rec.Ref = ref
+				done[id] = rec
+				r.logf("skip %s (%s)", id, short(ref))
+				continue
+			}
+		}
+
+		res, err := r.execute(ctx, p, s, bound)
+		if err != nil {
+			var rej *RejectedError
+			if r.Journal != nil && errors.As(err, &rej) {
+				// Recorded for forensics, with no ref, so it can never serve a hit.
+				_ = r.Journal.Append(Entry{Key: key, Step: id, Rejected: rej.Objections})
+			}
+			return done, fmt.Errorf("step %q: %w", id, err)
+		}
+
+		// Blob FIRST, then the journal line: a crash between them leaves an orphan
+		// blob (harmless), never a journal pointer to bytes that do not exist.
+		blob, err := json.Marshal(stepBlob{Output: res.Output, Produced: res.Produced})
+		if err != nil {
+			return done, err
+		}
+		ref, err := r.Blobs.Put(blob)
+		if err != nil {
+			return done, err
+		}
+		if r.Journal != nil {
+			ag := p.Agents[s.Agent]
+			if err := r.Journal.Append(Entry{
+				Key: key, Ref: ref, Step: id, Agent: ag.Backend + ":" + ag.Model,
+			}); err != nil {
+				return done, err
+			}
+		}
+		res.Ref = ref
 		done[id] = res
-		r.logf("done %s -> %s", id, short(res.Ref))
+		r.logf("done %s -> %s", id, short(ref))
 	}
 	return done, nil
 }
 
-func (r *Runner) runStep(ctx context.Context, p *Plan, s Step, done map[string]StepResult) (StepResult, error) {
-	backend, err := r.Backend(p.Agents[s.Agent])
-	if err != nil {
-		return StepResult{}, err
-	}
+// bound is a step's resolved inputs: what the agent is asked, what refs it
+// receives, and the canonical form those inputs take in the identity key.
+type bound struct {
+	prompt string
+	refs   map[string]aw.Ref
+	key    map[string]string
+}
 
-	// Resolve declared inputs. A state ref (a workspace, an artifact) travels as
-	// a REF, so the backend materializes it properly; only a scalar is rendered
-	// into the prompt, because that is the only kind a model can read directly.
-	//
-	// SORTED, not a map range. A provider's prompt cache is keyed on the exact
-	// leading tokens, so a randomized fold order changes the prompt bytes on every
-	// run and silently defeats every cache hit. Measured before this was sorted:
-	// three inputs produced three distinct prompts across repeated runs.
-	prompt := s.Prompt
-	inputs := map[string]aw.Ref{}
+// bind resolves declared inputs. A state ref (a workspace, an artifact) travels
+// as a REF so the backend materializes it properly; only a scalar is rendered
+// into the prompt, because that is the only kind a model can read directly.
+//
+// SORTED, not a map range. A provider's prompt cache is keyed on the exact
+// leading tokens, so a randomized fold order changes the prompt bytes on every run
+// and silently defeats every cache hit. Measured before this was sorted: three
+// inputs produced three distinct prompts across repeated runs.
+func (r *Runner) bind(s Step, done map[string]StepResult) (bound, error) {
+	b := bound{prompt: s.Prompt, refs: map[string]aw.Ref{}, key: map[string]string{}}
 	for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
-		src := s.Inputs[name]
-		did, field, _ := parseFrom(src)
+		did, field, _ := parseFrom(s.Inputs[name])
 		up := done[did]
 		if ref, ok := up.Produced[field]; ok {
-			inputs[name] = ref
+			b.refs[name] = ref
+			b.key[name] = ref.URI // the upstream's REF, not its key: early cutoff
 			continue
 		}
 		v, ok := up.Output[field]
 		if !ok {
-			return StepResult{}, fmt.Errorf("input %q: step %q produced no %q", name, did, field)
+			return bound{}, fmt.Errorf("input %q: step %q produced no %q", name, did, field)
 		}
-		prompt += fmt.Sprintf("\n\n--- input: %s ---\n%v", name, v)
+		b.prompt += fmt.Sprintf("\n\n--- input: %s ---\n%v", name, v)
+		b.key[name] = fmt.Sprint(v)
 	}
+	return b, nil
+}
 
+func (r *Runner) execute(ctx context.Context, p *Plan, s Step, b bound) (StepResult, error) {
+	backend, err := r.Backend(p.Agents[s.Agent])
+	if err != nil {
+		return StepResult{}, err
+	}
 	// The schema is pushed to the agent as an OPTIMIZATION. It is never the
 	// authority: Step.Validate re-checks locally on every backend, always.
-	inv := aw.Invocation{Prompt: prompt, Inputs: inputs, Schema: s.Schema()}
+	inv := aw.Invocation{Prompt: b.prompt, Inputs: b.refs, Schema: s.Schema()}
 
 	var res aw.Result
 	if s.Gate == nil {
@@ -118,16 +187,7 @@ func (r *Runner) runStep(ctx context.Context, p *Plan, s Step, done map[string]S
 	if err != nil {
 		return StepResult{}, err
 	}
-
-	blob, err := json.Marshal(stepBlob{Output: res.Output, Produced: res.Produced})
-	if err != nil {
-		return StepResult{}, err
-	}
-	ref, err := r.Blobs.Put(blob)
-	if err != nil {
-		return StepResult{}, err
-	}
-	return StepResult{Output: res.Output, Produced: res.Produced, Ref: ref}, nil
+	return StepResult{Output: res.Output, Produced: res.Produced}, nil
 }
 
 // runGated generates, submits the result to an independent panel, and repairs
@@ -187,13 +247,14 @@ func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backe
 		return aw.Result{}, err
 	}
 	if !out.Approved {
-		return aw.Result{}, fmt.Errorf("gate rejected after %d attempt(s): %s", out.Attempts, objections(out.Votes))
+		return aw.Result{}, &RejectedError{Step: s.ID, Attempts: out.Attempts, Objections: objections(out.Votes)}
 	}
 	r.logf("     gate passed on attempt %d", out.Attempts)
 	return accepted, nil
 }
 
-// objections summarizes why a panel refused, for the step's error.
+// objections summarizes why a panel refused, for the step's error and its journal
+// line.
 func objections(votes []gate.Verdict) string {
 	var b strings.Builder
 	for _, v := range votes {
@@ -211,31 +272,18 @@ func objections(votes []gate.Verdict) string {
 	return b.String()
 }
 
-// Reload rebuilds committed results from an id->ref map by reading each ref back
-// out of the store. Resume is literally re-reading content-addressed commits.
-func Reload(b store.Blobs, refs map[string]string) (map[string]StepResult, error) {
-	out := make(map[string]StepResult, len(refs))
-	for id, ref := range refs {
-		content, err := b.Get(ref)
-		if err != nil {
-			return nil, fmt.Errorf("reload %q: %w", id, err)
-		}
-		var blob stepBlob
-		if err := json.Unmarshal(content, &blob); err != nil {
-			return nil, fmt.Errorf("reload %q: %w", id, err)
-		}
-		out[id] = StepResult{Output: blob.Output, Produced: blob.Produced, Ref: ref}
+// load reads a committed record back out of the store. Reuse is literally
+// re-reading a content-addressed commit.
+func load(b store.Blobs, ref string) (StepResult, error) {
+	content, err := b.Get(ref)
+	if err != nil {
+		return StepResult{}, fmt.Errorf("load %s: %w", ref, err)
 	}
-	return out, nil
-}
-
-// Refs extracts the id->ref map for persisting run state (checkpoint/resume).
-func Refs(done map[string]StepResult) map[string]string {
-	m := make(map[string]string, len(done))
-	for id, r := range done {
-		m[id] = r.Ref
+	var blob stepBlob
+	if err := json.Unmarshal(content, &blob); err != nil {
+		return StepResult{}, fmt.Errorf("load %s: %w", ref, err)
 	}
-	return m
+	return StepResult{Output: blob.Output, Produced: blob.Produced}, nil
 }
 
 func (r *Runner) logf(format string, args ...any) {

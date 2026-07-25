@@ -1,22 +1,22 @@
 // Command aw runs aw pipelines and demos.
 //
-//	aw run <plan.yaml> [--store DIR] [--state FILE]   run a static-DAG pipeline
+//	aw run <plan.yaml> [--dir .aw] [--redo ID]...     run a static-DAG pipeline
 //	aw demo [candidate]                               gate/jury demo (release note)
 //
 // `run` executes a plan's steps in dependency order, committing each typed output
-// to a content-addressed store; with --store DIR (durable) and --state FILE it
-// checkpoints, so a re-run skips already-committed steps. `demo` shows the gate:
-// one model drafts, a jury of three votes, repair on rejection.
+// to a content-addressed store keyed by the step's identity. Re-running IS
+// resuming: a step whose key the journal already holds is skipped. `demo` shows
+// the gate: one model drafts, a jury of three votes, repair on rejection.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -43,7 +43,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  aw run <plan.yaml> [--store DIR] [--state FILE]\n  aw demo [candidate]")
+	fmt.Fprintln(os.Stderr, "usage:\n  aw run <plan.yaml> [--dir .aw] [--redo ID]...\n  aw demo [candidate]")
 	os.Exit(2)
 }
 
@@ -51,51 +51,51 @@ func usage() {
 
 func runPlan(args []string) {
 	// stdlib flag stops at the first positional, so lift the plan path out first
-	// — this lets flags appear before OR after it (aw run p.yaml --store DIR).
+	// — this lets flags appear before OR after it (aw run p.yaml --dir DIR).
 	planPath, flags := splitPlanArg(args)
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	storeDir := fs.String("store", "", "content-addressed store directory (default: in-memory)")
-	statePath := fs.String("state", "", "checkpoint/resume file (JSON id->ref)")
+	dir := fs.String("dir", ".aw", "state directory: blobs/ and journal.jsonl")
+	var redo repeated
+	fs.Var(&redo, "redo", "step id to re-run even if committed (repeatable)")
 	_ = fs.Parse(flags)
 	if planPath == "" {
-		fatal(errors.New("usage: aw run <plan.yaml> [--store DIR] [--state FILE]"))
+		fatal(errors.New("usage: aw run <plan.yaml> [--dir .aw] [--redo ID]..."))
 	}
 
 	p, err := plan.Load(planPath)
 	if err != nil {
+		fatal(err) // parse/validate: nothing ran, nothing was paid for
+	}
+
+	blobs, err := store.NewFS(filepath.Join(*dir, "blobs"))
+	if err != nil {
 		fatal(err)
 	}
-
-	var blobs store.Blobs = store.NewMem()
-	if *storeDir != "" {
-		b, err := store.NewFS(*storeDir)
-		if err != nil {
-			fatal(err)
-		}
-		blobs = b
-	}
-
-	done := map[string]plan.StepResult{}
-	if *statePath != "" {
-		if refs := loadState(*statePath); len(refs) > 0 {
-			if done, err = plan.Reload(blobs, refs); err != nil {
-				fatal(err)
-			}
-		}
+	journal, err := plan.OpenJournal(*dir)
+	if err != nil {
+		fatal(err)
 	}
 
 	r := &plan.Runner{
 		Blobs:   blobs,
+		Journal: journal,
+		Redo:    redo.set(),
 		Backend: claudeFactory,
 		Log:     func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 	}
 	fmt.Printf("[run] %s (%d steps)\n", planPath, len(p.Steps))
-	done, runErr := r.Run(context.Background(), p, done)
-	if *statePath != "" { // checkpoint even on a partial/failed run so resume works
-		saveState(*statePath, plan.Refs(done))
-	}
+	done, runErr := r.Run(context.Background(), p)
 	if runErr != nil {
-		fatal(runErr)
+		// A panel that refused is not a malfunction. Something reads $? in an
+		// unattended run, and "the work was rejected" needs a different response
+		// from "the machine broke".
+		var rej *plan.RejectedError
+		if errors.As(runErr, &rej) {
+			fmt.Fprintln(os.Stderr, "aw:", runErr)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "aw:", runErr)
+		os.Exit(3)
 	}
 
 	fmt.Println("[done]")
@@ -110,10 +110,10 @@ func runPlan(args []string) {
 }
 
 // splitPlanArg separates the single positional plan path from the flags,
-// value-aware so a flag's value (e.g. the DIR in `--store DIR`) is not mistaken
+// value-aware so a flag's value (e.g. the DIR in `--dir DIR`) is not mistaken
 // for the plan path. Supports flags before or after the path, and `--flag=val`.
 func splitPlanArg(args []string) (planPath string, flags []string) {
-	valueFlag := map[string]bool{"-store": true, "--store": true, "-state": true, "--state": true}
+	valueFlag := map[string]bool{"-dir": true, "--dir": true, "-redo": true, "--redo": true}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if strings.HasPrefix(a, "-") {
@@ -142,23 +142,20 @@ func claudeFactory(a plan.Agent) (aw.Backend, error) {
 	}
 }
 
-func loadState(path string) map[string]string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil // no state yet: a fresh run
-	}
-	var m map[string]string
-	if json.Unmarshal(b, &m) != nil {
+// repeated collects a flag given more than once, e.g. --redo a --redo b.
+type repeated []string
+
+func (r *repeated) String() string     { return strings.Join(*r, ",") }
+func (r *repeated) Set(v string) error { *r = append(*r, v); return nil }
+func (r *repeated) set() map[string]bool {
+	if len(*r) == 0 {
 		return nil
 	}
-	return m
-}
-
-func saveState(path string, refs map[string]string) {
-	b, _ := json.MarshalIndent(refs, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, "aw: warning: could not write state:", err)
+	m := make(map[string]bool, len(*r))
+	for _, v := range *r {
+		m[v] = true
 	}
+	return m
 }
 
 // ---- aw demo: the gate (generate -> jury -> repair) ----

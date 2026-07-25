@@ -514,14 +514,18 @@ re-validated locally on every backend · **`inputs:` as plain
 scalar → prompt) · **load-time field checking** (a reference to an undeclared
 field fails before a token is spent) · reserved-name rules · cycle checks ·
 per-step scratch dirs · tree capture/materialize · fail-closed gates ·
-append-only commits · process-group timeouts · **deterministic sorted input
-folding** (runtime obligation 2 — was a real bug, see below).
+process-group timeouts · **deterministic sorted input folding** (runtime
+obligation 2 — was a real bug, see below) · **the identity key** (resolved
+definition + resolved input refs; explicit defaults and judge order are free;
+`attempts` is excluded) · **the append-only journal** (`--dir`, blob-then-line,
+only an accepted result carries a ref, so a rejection is recorded and never
+reused) · **`--redo`** · exit 1 for a refusing panel vs 3 for a mechanical
+failure.
 
-Not yet: `expect:` · `--in`/`--dir`/`--redo`/`--dry-run`/`aw show` · the identity
-key and journal (today resume is a step-id map, i.e. latest-wins) · cutting
-`needs:` · hardcoding `attempts:` · committing the attempt the panel approved *by
-index* rather than the last one generated · a stable emitted system prompt
-(runtime obligation 1).
+Not yet: `expect:` · `--in` · `--dry-run` · `aw show` · cutting `needs:` ·
+hardcoding `attempts:` · committing the attempt the panel approved *by index*
+rather than the last one generated · a stable emitted system prompt (runtime
+obligation 1).
 
 Fixed while writing this spec, both found by specifying rather than by a bug report:
 the input fold used a Go map range, so any step with 2+ scalar inputs produced
