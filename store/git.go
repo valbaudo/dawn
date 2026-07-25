@@ -53,7 +53,15 @@ func NewTrees(dir string) (*Trees, error) {
 // .gitignore in the tree are excluded, so a capture and a diff agree on what
 // counts as content. Capturing an unchanged tree is cheap and returns the same
 // ref it did before.
-func (t *Trees) Capture(ctx context.Context, workDir string) (string, error) {
+//
+// Each path in must is additionally forced into the tree and asserted to exist.
+// Both properties matter and one call gives both: `git add -A` HONORS .gitignore,
+// so a declared artifact under an ignored directory (dist/, build/, target/ — the
+// normal case) would be silently absent from the captured tree; and `git add -f`
+// fails loudly on a path that was never produced. Verified: with `dist/` ignored,
+// plain `add -A` yields a tree where dist/aw does not exist, while
+// `add -f -- dist/aw` includes it and `add -f -- dist/nope` errors.
+func (t *Trees) Capture(ctx context.Context, workDir string, must ...string) (string, error) {
 	idx, done, err := t.tempIndex()
 	if err != nil {
 		return "", err
@@ -62,6 +70,12 @@ func (t *Trees) Capture(ctx context.Context, workDir string) (string, error) {
 	env := t.env(workDir, idx)
 	if out, err := git(ctx, workDir, env, "add", "-A"); err != nil {
 		return "", fmt.Errorf("store: capture %s: %w: %s", workDir, err, out)
+	}
+	if len(must) > 0 {
+		args := append([]string{"add", "-f", "--"}, must...)
+		if out, err := git(ctx, workDir, env, args...); err != nil {
+			return "", fmt.Errorf("store: declared path missing from %s: %w: %s", workDir, err, strings.TrimSpace(out))
+		}
 	}
 	out, err := git(ctx, workDir, env, "write-tree")
 	if err != nil {

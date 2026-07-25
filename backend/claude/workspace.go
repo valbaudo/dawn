@@ -101,7 +101,10 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 		return aw.Result{}, fmt.Errorf("claude: reported error: %s", env.Result)
 	}
 
-	tree, err := w.Trees.Capture(ctx, dir)
+	// Declared paths are forced into the tree AND asserted here — before the diff,
+	// before any judge. A step that did not produce what it promised fails without
+	// anyone paying to review it.
+	tree, err := w.Trees.Capture(ctx, dir, in.Expect...)
 	if err != nil {
 		return aw.Result{}, err
 	}
@@ -133,4 +136,10 @@ func workspaceInput(inputs map[string]aw.Ref) (aw.Ref, bool) {
 	return aw.Ref{}, false
 }
 
-var _ aw.Backend = Workspace{}
+// CapturesTree marks Workspace as able to honor Invocation.Expect.
+func (Workspace) CapturesTree() {}
+
+var (
+	_ aw.Backend      = Workspace{}
+	_ aw.TreeCapturer = Workspace{}
+)

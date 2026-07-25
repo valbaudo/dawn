@@ -520,12 +520,12 @@ definition + resolved input refs; explicit defaults and judge order are free;
 `attempts` is excluded) · **the append-only journal** (`--dir`, blob-then-line,
 only an accepted result carries a ref, so a rejection is recorded and never
 reused) · **`--redo`** · exit 1 for a refusing panel vs 3 for a mechanical
-failure.
+failure · **`expect:`** (forced past `.gitignore`, asserted at capture, before
+the diff and before any judge is paid; rejected up front on a backend that
+captures no tree) · **committing the panel-approved attempt by index**.
 
-Not yet: `expect:` · `--in` · `--dry-run` · `aw show` · cutting `needs:` ·
-hardcoding `attempts:` · committing the attempt the panel approved *by index*
-rather than the last one generated · a stable emitted system prompt (runtime
-obligation 1).
+Not yet: `--in` · `--dry-run` · `aw show` · cutting `needs:` · hardcoding
+`attempts:` · a stable emitted system prompt (runtime obligation 1).
 
 Fixed while writing this spec, both found by specifying rather than by a bug report:
 the input fold used a Go map range, so any step with 2+ scalar inputs produced

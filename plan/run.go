@@ -68,6 +68,22 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 	for _, s := range p.Steps {
 		idx[s.ID] = s
 	}
+	// Preflight: a step cannot assert paths against a backend that captures no
+	// tree. Checked for EVERY step before any of them runs, so an author mistake
+	// costs nothing rather than surfacing halfway through a paid pipeline.
+	for _, s := range p.Steps {
+		if len(s.Expect) == 0 {
+			continue
+		}
+		b, err := r.Backend(p.Agents[s.Agent])
+		if err != nil {
+			return nil, fmt.Errorf("step %q: %w", s.ID, err)
+		}
+		if _, ok := b.(aw.TreeCapturer); !ok {
+			return nil, fmt.Errorf("step %q declares expect: but agent %q (%s) captures no tree",
+				s.ID, s.Agent, b.Name())
+		}
+	}
 	done := map[string]StepResult{}
 
 	for _, id := range order {
@@ -172,7 +188,7 @@ func (r *Runner) execute(ctx context.Context, p *Plan, s Step, b bound) (StepRes
 	}
 	// The schema is pushed to the agent as an OPTIMIZATION. It is never the
 	// authority: Step.Validate re-checks locally on every backend, always.
-	inv := aw.Invocation{Prompt: b.prompt, Inputs: b.refs, Schema: s.Schema()}
+	inv := aw.Invocation{Prompt: b.prompt, Inputs: b.refs, Schema: s.Schema(), Expect: s.Expect}
 
 	var res aw.Result
 	if s.Gate == nil {
@@ -214,7 +230,13 @@ func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backe
 	r.logf("run  %s (%s) + gate: %d judges, quorum %d, up to %d attempts",
 		s.ID, backend.Name(), len(judges), quorum, attempts)
 
-	var accepted aw.Result
+	// One entry per generated attempt, so the committed record can be selected by
+	// the gate's OWN attempt index. Keeping a single `accepted` variable that each
+	// generation overwrites is correct only as long as Gate returns at the first
+	// pass and the caller errors on non-approval — i.e. it is a landmine: the day
+	// anything returns a last candidate on non-approval, an UNJUDGED result would
+	// ship under an accepted key.
+	var generated []aw.Result
 	gen := func(ctx context.Context, feedback string) (gate.Candidate, error) {
 		attempt := inv
 		if feedback != "" {
@@ -232,7 +254,7 @@ func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backe
 		if err := s.Validate(res.Output); err != nil {
 			return gate.Candidate{}, err
 		}
-		accepted = res // Gate returns at the first pass, so this is the accepted one
+		generated = append(generated, res)
 		// The jury reads the whole validated object, which deletes the question of
 		// which field the judges are looking at.
 		text, err := json.MarshalIndent(res.Output, "", "  ")
@@ -249,8 +271,14 @@ func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backe
 	if !out.Approved {
 		return aw.Result{}, &RejectedError{Step: s.ID, Attempts: out.Attempts, Objections: objections(out.Votes)}
 	}
+	// Commit the attempt the panel APPROVED, addressed by index — never merely the
+	// last one generated.
+	if out.Attempts < 1 || out.Attempts > len(generated) {
+		return aw.Result{}, fmt.Errorf("gate reported attempt %d of %d generated: refusing to commit an unidentified result",
+			out.Attempts, len(generated))
+	}
 	r.logf("     gate passed on attempt %d", out.Attempts)
-	return accepted, nil
+	return generated[out.Attempts-1], nil
 }
 
 // objections summarizes why a panel refused, for the step's error and its journal

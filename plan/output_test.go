@@ -1,10 +1,14 @@
 package plan
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/valbaudo/aw"
+	"github.com/valbaudo/aw/store"
 )
 
 func loadPlan(t *testing.T, yaml string) (*Plan, error) {
@@ -149,5 +153,28 @@ func TestValidateIgnoresReserved(t *testing.T) {
 	s := Step{Output: map[string]Type{"text": {}}}
 	if err := s.Validate(map[string]any{"text": "hi", "diff": "--- a\n+++ b"}); err != nil {
 		t.Fatalf("reserved backend fields must not trip validation: %v", err)
+	}
+}
+
+// `expect:` is a postcondition on a captured tree, so a text-only agent has
+// nothing to assert against. Caught for every step before any of them runs.
+func TestExpectRequiresATreeCapturingBackend(t *testing.T) {
+	p := &Plan{
+		Version: 1,
+		Agents:  map[string]Agent{"w": {Backend: "x", Model: "gen"}},
+		Steps:   []Step{{ID: "build", Agent: "w", Prompt: "build it", Expect: []string{"dist/aw"}}},
+	}
+	var calls int
+	r := &Runner{Blobs: store.NewMem(),
+		Backend: func(Agent) (aw.Backend, error) { return echoBackend{&calls}, nil }}
+	_, err := r.Run(context.Background(), p)
+	if err == nil {
+		t.Fatal("expect: on a backend that captures no tree must be rejected")
+	}
+	if !strings.Contains(err.Error(), "captures no tree") {
+		t.Fatalf("error should explain why, got: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("the check must happen BEFORE anything runs, but %d invocations were made", calls)
 	}
 }

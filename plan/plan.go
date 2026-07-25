@@ -38,6 +38,7 @@ type Step struct {
 	Needs  []string          `yaml:"needs,omitempty"`
 	Inputs map[string]string `yaml:"inputs,omitempty"` // name -> "steps.<id>.<field>"
 	Output map[string]Type   `yaml:"output,omitempty"` // field -> type; omitted => {text: string}
+	Expect []string          `yaml:"expect,omitempty"` // paths that MUST exist in the captured tree
 	Gate   *Gate             `yaml:"gate,omitempty"`   // optional acceptance check
 }
 

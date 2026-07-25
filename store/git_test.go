@@ -183,3 +183,60 @@ func TestCaptureIgnoresNestedGitDir(t *testing.T) {
 		t.Fatal("a nested .git must not be captured as content")
 	}
 }
+
+// `git add -A` HONORS .gitignore, so a declared artifact under an ignored
+// directory (dist/, build/, target/ — the normal case) would be silently absent
+// from the captured tree. Capture's `must` paths are forced past it.
+func TestCaptureForcesDeclaredPathsPastGitignore(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	d := t.TempDir()
+	writeFile(t, d, ".gitignore", "dist/\n")
+	writeFile(t, d, "main.go", "package main\n")
+	writeFile(t, d, "dist/aw", "a binary\n")
+
+	// without declaring it, the artifact is silently dropped
+	plain, err := tr.Capture(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bare := t.TempDir()
+	if err := tr.Materialize(ctx, plain, bare); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(bare, "dist", "aw")); !os.IsNotExist(err) {
+		t.Fatal("precondition: an ignored path should NOT be captured by default")
+	}
+
+	// declaring it forces it in
+	forced, err := tr.Capture(ctx, d, "dist/aw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, forced, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "dist", "aw"))
+	if err != nil {
+		t.Fatalf("declared artifact missing from the tree: %v", err)
+	}
+	if string(got) != "a binary\n" {
+		t.Fatalf("declared artifact = %q", got)
+	}
+}
+
+// A declared path the agent never produced must fail LOUDLY, at capture time —
+// which is before the diff and before any judge is paid.
+func TestCaptureFailsOnAMissingDeclaredPath(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	d := t.TempDir()
+	writeFile(t, d, "main.go", "package main\n")
+
+	_, err := tr.Capture(ctx, d, "dist/never-built")
+	if err == nil {
+		t.Fatal("a declared path that was never produced must fail the capture")
+	}
+	if !strings.Contains(err.Error(), "dist/never-built") {
+		t.Fatalf("the error must name the missing path, got: %v", err)
+	}
+}

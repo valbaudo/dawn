@@ -43,6 +43,21 @@ type Invocation struct {
 	Prompt string         // the request
 	Schema map[string]any // JSON Schema for typed output; nil => free text
 	Inputs map[string]Ref // named state fed in (materialized by the backend)
+	// Expect names paths that MUST exist in what this invocation produces. It is
+	// a postcondition, not a request: a backend that captures a tree asserts it at
+	// capture time, so a step that failed to produce a declared artifact fails
+	// before anything downstream — including a judge — is paid for.
+	Expect []string
+}
+
+// TreeCapturer is an optional [Backend] interface: a backend that runs its agent
+// inside a directory and captures the resulting tree, and can therefore honor
+// [Invocation.Expect]. A backend that does not implement it has no tree to assert
+// against, which lets a caller reject `expect:` on a text-only agent up front
+// rather than discovering it mid-run.
+type TreeCapturer interface {
+	Backend
+	CapturesTree()
 }
 
 // Result is what one invocation produced. Committing it to a store (and the

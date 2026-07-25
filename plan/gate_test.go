@@ -2,6 +2,7 @@ package plan
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -270,5 +271,61 @@ func TestInputFoldIsDeterministic(t *testing.T) {
 			t.Fatalf("run %d differs from run 0 — the fold is not deterministic\n--- 0 ---\n%s\n--- %d ---\n%s",
 				i, first, i, got)
 		}
+	}
+}
+
+// counting emits a distinguishable payload per call, so a test can tell WHICH
+// attempt's result was committed.
+type counting struct{ n *int }
+
+func (c counting) Name() string { return "counting" }
+func (c counting) Invoke(_ context.Context, in aw.Invocation) (aw.Result, error) {
+	*c.n++
+	return aw.Result{Output: conform(in, fmt.Sprintf("attempt-%d", *c.n))}, nil
+}
+
+// approveOn votes yes only once the candidate carries the given marker.
+type approveOn struct {
+	name, marker string
+}
+
+func (a approveOn) Name() string { return a.name }
+func (a approveOn) Invoke(_ context.Context, in aw.Invocation) (aw.Result, error) {
+	return aw.Result{Output: map[string]any{
+		"approved": strings.Contains(in.Prompt, a.marker),
+		"reason":   "looking for " + a.marker,
+	}}, nil
+}
+
+// The committed record must be the attempt the panel APPROVED, selected by the
+// gate's own attempt index — not whatever the generator happened to produce last.
+func TestCommitsTheApprovedAttemptNotTheLast(t *testing.T) {
+	var n int
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]aw.Backend{
+		"gen": counting{&n},
+		"j1":  approveOn{"j1", "attempt-2"},
+		"j2":  approveOn{"j2", "attempt-2"},
+	})}
+	p := &Plan{
+		Version: 1,
+		Agents: map[string]Agent{
+			"w": {Backend: "x", Model: "gen"},
+			"a": {Backend: "x", Model: "j1"},
+			"b": {Backend: "x", Model: "j2"},
+		},
+		Steps: []Step{{ID: "draft", Agent: "w", Prompt: "write",
+			Output: map[string]Type{"text": {}},
+			Gate:   &Gate{Judges: []string{"a", "b"}, Criteria: "c", Attempts: 4}}},
+	}
+	done, err := r.Run(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := done["draft"].Output["text"].(string)
+	if !strings.Contains(got, "attempt-2") {
+		t.Fatalf("committed the wrong attempt: %q (the panel approved attempt 2)", got)
+	}
+	if n != 2 {
+		t.Fatalf("expected the gate to stop generating at the approved attempt, generated %d", n)
 	}
 }
