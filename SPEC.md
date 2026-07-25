@@ -57,6 +57,9 @@ never declarable. The step id `in` is reserved and filled by `--in DIR`.
 - **References are two segments**, `<step>.<field>`, resolved at load against the
   upstream's declared `outputs:` plus the reserved names. Step ids are `[a-z0-9_-]+`, so
   a `.` can never make a reference ambiguous.
+- **Every invocation is bounded at 30m**, and the repair loop at 3 attempts. Both are
+  the requirement (bounded), not a knob (tunable). Unattended plus no deadline means a
+  hung tool call burns the night looking like slow work.
 - **Repair is bounded at 3.** A bounded loop is the requirement; a tunable one is not.
   `attempts` is already excluded from the identity key — a result accepted under 3
   attempts is equally accepted under 5, which is policy — so fixing it changes no cache

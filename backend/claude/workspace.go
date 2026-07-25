@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/valbaudo/aw"
 	"github.com/valbaudo/aw/proc"
@@ -31,10 +32,11 @@ import (
 // Workspace only at a tree you are willing to let it change; the demos use a
 // throwaway temp dir they create and delete.
 type Workspace struct {
-	Dir   string       // working dir; empty means materialize from Inputs
-	Model string       // default model; an Invocation may override
-	Bin   string       // defaults to "claude"
-	Trees *store.Trees // required: where trees are captured and materialized
+	Dir     string        // working dir; empty means materialize from Inputs
+	Model   string        // default model; an Invocation may override
+	Bin     string        // defaults to "claude"
+	Timeout time.Duration // 0 => DefaultTimeout
+	Trees   *store.Trees  // required: where trees are captured and materialized
 }
 
 // Name reports the backend and its default model, e.g. "claude-ws:sonnet".
@@ -50,6 +52,8 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 	if w.Trees == nil {
 		return aw.Result{}, fmt.Errorf("workspace: Trees is required")
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeoutOr(w.Timeout))
+	defer cancel()
 	model := in.Model
 	if model == "" {
 		model = w.Model

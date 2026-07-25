@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/valbaudo/aw"
 	"github.com/valbaudo/aw/proc"
@@ -19,6 +20,13 @@ import (
 // defaultSystem is the stable system prompt used when an Invocation declares
 // none. It must contain nothing per-machine and nothing per-run — no paths, no
 // timestamps, no ids — or it stops being a cacheable prefix.
+// DefaultTimeout bounds ONE invocation. Unattended means nobody is watching, and a
+// hung tool call with no deadline is indistinguishable from slow work — it just
+// burns the night. proc.Command already kills the whole process group on cancel;
+// this is what finally drives it. A field rather than a constant so a caller can
+// tighten it, zero meaning the default.
+const DefaultTimeout = 30 * time.Minute
+
 const defaultSystem = "You are a precise assistant. Follow the instructions exactly " +
 	"and return only what is asked for."
 
@@ -26,8 +34,9 @@ const defaultSystem = "You are a precise assistant. Follow the instructions exac
 // is the default model ("haiku"|"sonnet"|"opus"|a full id); an Invocation may
 // override it per call. Bin overrides the binary name for tests.
 type Backend struct {
-	Model string
-	Bin   string // defaults to "claude" on PATH
+	Model   string
+	Bin     string        // defaults to "claude" on PATH
+	Timeout time.Duration // 0 => DefaultTimeout
 }
 
 // Name reports the backend and its default model, e.g. "claude:opus".
@@ -54,6 +63,8 @@ type claudeEnvelope struct {
 // JSON object and the reply is parsed into Result.Output; otherwise Output holds
 // the raw assistant text under the "text" key.
 func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeoutOr(b.Timeout))
+	defer cancel()
 	model := in.Model
 	if model == "" {
 		model = b.Model
@@ -148,6 +159,14 @@ func extractJSON(s string) (map[string]any, error) {
 		}
 	}
 	return nil, fmt.Errorf("claude: reply contained no JSON object: %s", elide(strings.TrimSpace(s), 200))
+}
+
+// timeoutOr resolves a zero timeout to the default.
+func timeoutOr(d time.Duration) time.Duration {
+	if d <= 0 {
+		return DefaultTimeout
+	}
+	return d
 }
 
 // elide shortens a string for an error message.
