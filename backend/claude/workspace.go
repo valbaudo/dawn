@@ -85,8 +85,18 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 		return aw.Result{}, err
 	}
 
+	// An editing agent NEEDS Claude Code's default system prompt (that is where its
+	// file tools are described), so unlike the text backend this one cannot replace
+	// it. --exclude-dynamic-system-prompt-sections is the surgical alternative:
+	// Anthropic moves the per-machine sections (cwd, env, memory paths, git status)
+	// out of the system prompt and into the first user message, which is precisely
+	// the drift that defeats prefix caching. Its own documentation says it
+	// "improves cross-user prompt-cache reuse"; it is ignored with --system-prompt,
+	// which is why the two backends take different routes to the same property.
 	cmd := proc.Command(ctx, bin, "-p", prompt, "--model", model,
-		"--output-format", "json", "--dangerously-skip-permissions")
+		"--output-format", "json", "--dangerously-skip-permissions",
+		"--exclude-dynamic-system-prompt-sections",
+		"--no-session-persistence")
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

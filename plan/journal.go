@@ -18,12 +18,24 @@ import (
 // is the point. The model is nondeterministic, so the honest response to "this
 // was rejected last night" is to run it again.
 type Entry struct {
-	Key      string `json:"key"`
-	Ref      string `json:"ref,omitempty"`
-	Step     string `json:"step"`
-	Agent    string `json:"agent,omitempty"`
-	Rejected string `json:"rejected,omitempty"`
-	At       string `json:"at"`
+	Key      string  `json:"key"`
+	Ref      string  `json:"ref,omitempty"`
+	Step     string  `json:"step"`
+	Agent    string  `json:"agent,omitempty"`
+	Rejected string  `json:"rejected,omitempty"`
+	Tokens   *Tokens `json:"tokens,omitempty"`
+	At       string  `json:"at"`
+}
+
+// Tokens is the per-step usage recorded as provenance. aw ships no cache knob —
+// it owns prompt ORDERING and then reports what the provider actually did, so the
+// money lever is falsifiable rather than asserted. CacheRead staying at zero
+// across repeated runs means the prefix is not stable.
+type Tokens struct {
+	In          int `json:"in"`
+	Out         int `json:"out"`
+	CacheRead   int `json:"cache_read"`
+	CacheCreate int `json:"cache_create"`
 }
 
 // Journal is an append-only log of what a step's key resolved to. It is the whole

@@ -19,6 +19,7 @@ import (
 type StepResult struct {
 	Output   map[string]any
 	Produced map[string]aw.Ref
+	Tokens   aw.Tokens
 	Ref      string
 }
 
@@ -134,6 +135,8 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 			ag := p.Agents[s.Agent]
 			if err := r.Journal.Append(Entry{
 				Key: key, Ref: ref, Step: id, Agent: ag.Backend + ":" + ag.Model,
+				Tokens: &Tokens{In: res.Tokens.Input, Out: res.Tokens.Output,
+					CacheRead: res.Tokens.CacheRead, CacheCreate: res.Tokens.CacheCreate},
 			}); err != nil {
 				return done, err
 			}
@@ -203,7 +206,7 @@ func (r *Runner) execute(ctx context.Context, p *Plan, s Step, b bound) (StepRes
 	if err != nil {
 		return StepResult{}, err
 	}
-	return StepResult{Output: res.Output, Produced: res.Produced}, nil
+	return StepResult{Output: res.Output, Produced: res.Produced, Tokens: res.Tokens}, nil
 }
 
 // runGated generates, submits the result to an independent panel, and repairs

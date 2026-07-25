@@ -16,6 +16,12 @@ import (
 	"github.com/valbaudo/aw/proc"
 )
 
+// defaultSystem is the stable system prompt used when an Invocation declares
+// none. It must contain nothing per-machine and nothing per-run — no paths, no
+// timestamps, no ids — or it stops being a cacheable prefix.
+const defaultSystem = "You are a precise assistant. Follow the instructions exactly " +
+	"and return only what is asked for."
+
 // Backend runs one `claude -p --model <model> --output-format json` call. Model
 // is the default model ("haiku"|"sonnet"|"opus"|a full id); an Invocation may
 // override it per call. Bin overrides the binary name for tests.
@@ -52,10 +58,23 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 	if model == "" {
 		model = b.Model
 	}
-	prompt := in.Prompt
-	if in.System != "" {
-		prompt = in.System + "\n\n" + prompt
+	// A STABLE system prompt is the whole caching story for this backend. Claude
+	// Code's default preset embeds per-machine sections (cwd, env, git status)
+	// that drift a few tokens between runs; prefix matching is exact, so every
+	// byte after the drift point recomputes and the caller's content never caches.
+	// Measured: with the default preset, cache_creation stays ~20.5k on EVERY call
+	// and cache_read never covers the caller's prompt. Passing an explicit system
+	// prompt replaces the preset with bytes aw controls, and the same content then
+	// reads from cache across unrelated invocations.
+	//
+	// Replacing the preset is right HERE and wrong for Workspace: this backend
+	// makes one prompt-to-JSON call and needs no file tools, while an editing agent
+	// does. See workspace.go for the other half.
+	system := in.System
+	if system == "" {
+		system = defaultSystem
 	}
+	prompt := in.Prompt
 	if in.Schema != nil {
 		hint, err := json.Marshal(in.Schema)
 		if err != nil {
@@ -71,7 +90,13 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 	// proc.Command, not exec.CommandContext: claude spawns tool subprocesses that
 	// inherit stdout, and killing only the direct child leaves the pipe open, so
 	// a timeout would hang instead of firing.
-	cmd := proc.Command(ctx, bin, "-p", prompt, "--model", model, "--output-format", "json")
+	cmd := proc.Command(ctx, bin, "-p", prompt,
+		"--model", model,
+		"--output-format", "json",
+		"--system-prompt", system,
+		// aw never resumes a session, so persisting one per invocation only
+		// litters ~/.claude/projects with a directory per call.
+		"--no-session-persistence")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

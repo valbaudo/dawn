@@ -522,10 +522,14 @@ only an accepted result carries a ref, so a rejection is recorded and never
 reused) · **`--redo`** · exit 1 for a refusing panel vs 3 for a mechanical
 failure · **`expect:`** (forced past `.gitignore`, asserted at capture, before
 the diff and before any judge is paid; rejected up front on a backend that
-captures no tree) · **committing the panel-approved attempt by index**.
+captures no tree) · **committing the panel-approved attempt by index** ·
+**runtime obligation 1** (an explicit stable `--system-prompt` on the text
+backend, `--exclude-dynamic-system-prompt-sections` on the workspace backend
+which needs the default preset for its file tools) · **per-step token counts in
+the journal**, so the money lever is falsifiable rather than asserted.
 
 Not yet: `--in` · `--dry-run` · `aw show` · cutting `needs:` · hardcoding
-`attempts:` · a stable emitted system prompt (runtime obligation 1).
+`attempts:`.
 
 Fixed while writing this spec, both found by specifying rather than by a bug report:
 the input fold used a Go map range, so any step with 2+ scalar inputs produced

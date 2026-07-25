@@ -70,6 +70,34 @@ Independent runs elsewhere measured the drift directly as cache_creation of
 written every run (~78% cached, not 100%). Unexplained; possibly breakpoint
 placement or a residual unstable segment. Do not quote 100%.
 
+## 5. After the fix: caller content caches across unrelated invocations
+
+`claude.Backend` now passes an explicit `--system-prompt` (replacing the drifting
+preset) and `claude.Workspace` passes
+`--exclude-dynamic-system-prompt-sections`, which is Anthropic's own flag for
+this: it *"moves per-machine sections (cwd, env info, memory paths, git status)
+from the system prompt into the first user message"* and its documented purpose
+is to *"improve cross-user prompt-cache reuse"*. It is ignored with
+`--system-prompt`, which is why the two backends take different routes.
+
+Measured through `aw run` itself: two DIFFERENT plan files, in DIFFERENT state
+directories, whose prompts share a ~6k-token leading block and differ only in the
+final line.
+
+| run | cc | cr |
+|---|---|---|
+| A (cold) | 30,345 | 0 |
+| B | 12,416 | **17,929** |
+
+B read 17,929 tokens that A created. Before the fix this number was structurally
+zero for caller content: the flat 20,215 in §1 was Claude Code's own preset, and
+the caller's block was re-created on every call.
+
+**Partial, and expected to be.** ~59% of the cold cost came from cache; the rest
+is the span after the last cache breakpoint before the two prompts diverge.
+Breakpoint placement is the provider's, not aw's — which is exactly why aw ships
+ordering discipline plus the measurement, and no knob.
+
 ## What this means
 
 **Settled:**
