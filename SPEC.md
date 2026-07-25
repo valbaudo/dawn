@@ -1,6 +1,6 @@
 # The aw plan language
 
-**Status: design.** The code implements an earlier, larger surface — see [Delta](#delta).
+**Status: implemented.** See [Delta](#delta) for the few gaps that remain.
 
 A plan is a static DAG of agent invocations. One mechanism — a **named input** —
 carries every kind of state a step needs. No sessions, no templating, no control flow.
@@ -407,17 +407,20 @@ and a posture that dangerous should be a word an author typed.
 
 ## Delta
 
-The code implements the **earlier 15-key surface**: `version:`, an `agents:` block with
-`backend:`/`model:`, `steps:` as a sequence with `id:`, `steps.`-prefixed references,
-`output:` singular, and `attempts:`.
+The code implements this spec. `aw run` and `aw show` work end to end: typed
+outputs with load-time reference checking, inputs resolved by kind, `expect:`,
+gates with quorum and bounded repair, the identity key, the append-only journal,
+`--redo`, `--in`, per-step scratch dirs, tree capture and materialize, stable
+prefixes, process-group timeouts, and the exit-code table.
 
-Built and unchanged by this reduction: typed outputs with both forms and the load-time
-reference check · inputs resolved by kind · `expect:` · the identity key · the
-append-only journal · `--redo` · fail-closed gates with quorum and bounded repair ·
-committing the panel-approved attempt by index · per-step scratch dirs · tree
-capture/materialize · process-group timeouts · deterministic sorted folding · stable
-prefixes.
+Not yet: more backends than `claude` and `claude-ws` (codex, an HTTP LLM), and
+concurrency beyond the jury. Both slot behind existing seams.
 
-To reach this spec: `steps:` as a map keyed by id · `agent: <backend>/<model>` · drop
-`version:` and the `steps.` prefix · `output:` → `outputs:` · hardcode `attempts:` · cut
-`needs:` · `aw show` replacing `--dry-run` and `--into` · the exit-code table.
+Honest gaps in what is built, none of them language-level:
+- `aw show PLAN` prices a run in **calls**, not dollars, and everything past the
+  first stale step reads `unknown` — a step's key depends on its upstream's
+  resolved output, which is the price of early cutoff.
+- The 128KB evidence cap and the diff rendering a binary as one sentence are
+  described in §4 but not yet implemented; a panel currently sees the raw diff.
+- Nothing yet warns when a hit's recorded agent version differs from the current
+  one (open question 1).
