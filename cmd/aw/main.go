@@ -15,7 +15,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,7 +101,11 @@ func runPlan(args []string) {
 	fmt.Println("[done]")
 	for _, s := range p.Steps {
 		res := done[s.ID]
-		fmt.Printf("  %-12s %s\n  %s\n", s.ID, short(res.Ref), oneLine(fmt.Sprint(pick(res.Output, s.Output))))
+		fmt.Printf("  %-12s %s\n", s.ID, short(res.Ref))
+		for _, f := range slices.Sorted(maps.Keys(s.Fields())) {
+			v, _ := res.Output[f].(string)
+			fmt.Printf("    %s: %s\n", f, oneLine(v))
+		}
 	}
 }
 
@@ -153,15 +159,6 @@ func saveState(path string, refs map[string]string) {
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "aw: warning: could not write state:", err)
 	}
-}
-
-func pick(out map[string]any, field string) any {
-	if field != "" {
-		if v, ok := out[field]; ok {
-			return v
-		}
-	}
-	return out["text"]
 }
 
 // ---- aw demo: the gate (generate -> jury -> repair) ----

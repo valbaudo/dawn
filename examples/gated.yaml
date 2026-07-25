@@ -19,7 +19,7 @@ steps:
   - id: release_note
     agent: writer
     prompt: Write a three-sentence release note for a new `aw run --json` flag that streams machine-readable events.
-    output: text
+    output: { text: string }
     gate:
       judges: [haiku, sonnet, opus]
       quorum: 2

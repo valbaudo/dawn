@@ -15,12 +15,12 @@ steps:
   - id: draft
     agent: writer
     prompt: Write one vivid sentence about content-addressed storage.
-    output: sentence
+    output: { sentence: string }
 
   - id: tighten
     agent: editor
     needs: [draft]
     prompt: Rewrite the provided sentence to be tighter and more concrete. Return only the rewrite.
     inputs:
-      draft: { from: steps.draft.sentence }
-    output: sentence
+      draft: steps.draft.sentence
+    output: { sentence: string }

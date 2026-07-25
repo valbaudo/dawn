@@ -18,9 +18,8 @@ func (p producer) Invoke(_ context.Context, in aw.Invocation) (aw.Result, error)
 	if p.seen != nil {
 		*p.seen = append(*p.seen, in)
 	}
-	out := map[string]any{"text": in.Prompt, "note": "hello"}
 	return aw.Result{
-		Output:   out,
+		Output:   conform(in, in.Prompt),
 		Produced: map[string]aw.Ref{"workspace": {Kind: aw.KindWorkspace, URI: "tree-abc"}},
 	}, nil
 }
@@ -74,7 +73,7 @@ func gatedPlan(g *Gate) *Plan {
 			"b":      {Backend: "x", Model: "yes2"},
 			"c":      {Backend: "x", Model: "no"},
 		},
-		Steps: []Step{{ID: "draft", Agent: "writer", Prompt: "write", Output: "text", Gate: g}},
+		Steps: []Step{{ID: "draft", Agent: "writer", Prompt: "write", Output: map[string]Type{"text": {}}, Gate: g}},
 	}
 }
 
@@ -140,11 +139,11 @@ func TestRefInputsTravelAsRefs(t *testing.T) {
 		Version: 1,
 		Agents:  map[string]Agent{"w": {Backend: "x", Model: "gen"}},
 		Steps: []Step{
-			{ID: "first", Agent: "w", Prompt: "make it", Output: "text"},
+			{ID: "first", Agent: "w", Prompt: "make it", Output: map[string]Type{"text": {}, "note": {}}},
 			{ID: "second", Agent: "w", Prompt: "use it", Needs: []string{"first"},
-				Inputs: map[string]Source{
-					"repo": {From: "steps.first.workspace"}, // a produced ref
-					"note": {From: "steps.first.note"},      // a scalar
+				Inputs: map[string]string{
+					"repo": "steps.first.workspace", // a produced ref
+					"note": "steps.first.note",      // a scalar
 				}},
 		},
 	}
@@ -165,8 +164,8 @@ func TestRefInputsTravelAsRefs(t *testing.T) {
 	if strings.Contains(second.Prompt, "tree-abc") {
 		t.Fatal("a ref must NOT be stringified into the prompt")
 	}
-	if !strings.Contains(second.Prompt, "hello") {
-		t.Fatal("a scalar input should still be rendered into the prompt")
+	if !strings.Contains(second.Prompt, "make it") {
+		t.Fatalf("a scalar input should still be rendered into the prompt:\n%s", second.Prompt)
 	}
 }
 
@@ -178,7 +177,7 @@ func TestProducedRefsSurviveResume(t *testing.T) {
 	p := &Plan{
 		Version: 1,
 		Agents:  map[string]Agent{"w": {Backend: "x", Model: "gen"}},
-		Steps:   []Step{{ID: "first", Agent: "w", Prompt: "make it", Output: "text"}},
+		Steps:   []Step{{ID: "first", Agent: "w", Prompt: "make it", Output: map[string]Type{"text": {}}}},
 	}
 	done, err := r.Run(context.Background(), p, nil)
 	if err != nil {
@@ -229,15 +228,15 @@ func TestInputFoldIsDeterministic(t *testing.T) {
 		Version: 1,
 		Agents:  map[string]Agent{"w": {Backend: "x", Model: "gen"}},
 		Steps: []Step{
-			{ID: "a", Agent: "w", Prompt: "A", Output: "text"},
-			{ID: "b", Agent: "w", Prompt: "B", Output: "text"},
-			{ID: "c", Agent: "w", Prompt: "C", Output: "text"},
-			{ID: "d", Agent: "w", Prompt: "D", Output: "text"},
-			{ID: "sink", Agent: "w", Prompt: "SINK", Inputs: map[string]Source{
-				"alpha":   {From: "steps.a.text"},
-				"bravo":   {From: "steps.b.text"},
-				"charlie": {From: "steps.c.text"},
-				"delta":   {From: "steps.d.text"},
+			{ID: "a", Agent: "w", Prompt: "A", Output: map[string]Type{"text": {}}},
+			{ID: "b", Agent: "w", Prompt: "B", Output: map[string]Type{"text": {}}},
+			{ID: "c", Agent: "w", Prompt: "C", Output: map[string]Type{"text": {}}},
+			{ID: "d", Agent: "w", Prompt: "D", Output: map[string]Type{"text": {}}},
+			{ID: "sink", Agent: "w", Prompt: "SINK", Inputs: map[string]string{
+				"alpha":   "steps.a.text",
+				"bravo":   "steps.b.text",
+				"charlie": "steps.c.text",
+				"delta":   "steps.d.text",
 			}},
 		},
 	}

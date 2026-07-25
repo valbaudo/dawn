@@ -88,7 +88,7 @@ func (r *Runner) runStep(ctx context.Context, p *Plan, s Step, done map[string]S
 	inputs := map[string]aw.Ref{}
 	for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
 		src := s.Inputs[name]
-		did, field, _ := parseFrom(src.From)
+		did, field, _ := parseFrom(src)
 		up := done[did]
 		if ref, ok := up.Produced[field]; ok {
 			inputs[name] = ref
@@ -101,19 +101,17 @@ func (r *Runner) runStep(ctx context.Context, p *Plan, s Step, done map[string]S
 		prompt += fmt.Sprintf("\n\n--- input: %s ---\n%v", name, v)
 	}
 
-	inv := aw.Invocation{Prompt: prompt, Inputs: inputs}
-	if s.Output != "" {
-		inv.Schema = map[string]any{
-			"type": "object", "additionalProperties": false,
-			"required":   []any{s.Output},
-			"properties": map[string]any{s.Output: map[string]any{"type": "string"}},
-		}
-	}
+	// The schema is pushed to the agent as an OPTIMIZATION. It is never the
+	// authority: Step.Validate re-checks locally on every backend, always.
+	inv := aw.Invocation{Prompt: prompt, Inputs: inputs, Schema: s.Schema()}
 
 	var res aw.Result
 	if s.Gate == nil {
 		r.logf("run  %s (%s)", s.ID, backend.Name())
 		res, err = backend.Invoke(ctx, inv)
+		if err == nil {
+			err = s.Validate(res.Output)
+		}
 	} else {
 		res, err = r.runGated(ctx, p, s, backend, inv)
 	}
@@ -153,11 +151,6 @@ func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backe
 	if attempts == 0 {
 		attempts = 3
 	}
-	field := s.Output
-	if field == "" {
-		field = "text"
-	}
-
 	r.logf("run  %s (%s) + gate: %d judges, quorum %d, up to %d attempts",
 		s.ID, backend.Name(), len(judges), quorum, attempts)
 
@@ -165,14 +158,28 @@ func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backe
 	gen := func(ctx context.Context, feedback string) (gate.Candidate, error) {
 		attempt := inv
 		if feedback != "" {
+			// APPENDED, never prepended: the leading bytes stay identical, which is
+			// the one cache win the repair loop can honestly claim.
 			attempt.Prompt = inv.Prompt + "\n\n" + feedback
 		}
 		res, err := backend.Invoke(ctx, attempt)
 		if err != nil {
 			return gate.Candidate{}, err
 		}
+		// Validate BEFORE the panel sees it: a non-conforming candidate never
+		// reaches a judge, and a schema violation is a mechanical failure rather
+		// than a rejection that would burn a repair attempt nobody evaluated.
+		if err := s.Validate(res.Output); err != nil {
+			return gate.Candidate{}, err
+		}
 		accepted = res // Gate returns at the first pass, so this is the accepted one
-		return gate.FromResult(res, field), nil
+		// The jury reads the whole validated object, which deletes the question of
+		// which field the judges are looking at.
+		text, err := json.MarshalIndent(res.Output, "", "  ")
+		if err != nil {
+			return gate.Candidate{}, err
+		}
+		return gate.Candidate{Text: string(text), Produced: res.Produced}, nil
 	}
 
 	out, err := gate.Gate(ctx, gen, judges, g.Criteria, quorum, attempts)

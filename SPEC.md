@@ -506,17 +506,22 @@ Each is a parse error with a one-sentence message naming the alternative.
 
 ## Delta: spec vs code
 
-Built today: `version` `agents` `steps` `id` `agent` `prompt` `inputs` `gate`
-(judges/criteria/quorum/attempts), load-time reference + cycle checks, per-step
-scratch dirs, tree capture/materialize, fail-closed gates, append-only commits,
-process-group timeouts, **deterministic sorted input folding** (runtime obligation
-2 — was a real bug, see below).
+Built today: `version` `agents` `steps` `id` `agent` `prompt` `gate`
+(judges/criteria/quorum/attempts) · **`output:` as a typed field map** with both
+type forms, defaulting to `{text: string}`, compiling to strict JSON Schema and
+re-validated locally on every backend · **`inputs:` as plain
+`steps.<id>.<field>` strings**, resolved by kind (ref → `Invocation.Inputs`,
+scalar → prompt) · **load-time field checking** (a reference to an undeclared
+field fails before a token is spent) · reserved-name rules · cycle checks ·
+per-step scratch dirs · tree capture/materialize · fail-closed gates ·
+append-only commits · process-group timeouts · **deterministic sorted input
+folding** (runtime obligation 2 — was a real bug, see below).
 
-Not yet: `output:` as a typed map (today it's one string field) · `expect:` ·
-`--in`/`--dir`/`--redo`/`--dry-run`/`aw show` · the identity key and journal (today
-resume is a step-id map, i.e. latest-wins) · cutting `needs:` and `attempts:` ·
-committing the attempt the panel approved *by index* rather than the last one
-generated · a stable emitted system prompt (runtime obligation 1).
+Not yet: `expect:` · `--in`/`--dir`/`--redo`/`--dry-run`/`aw show` · the identity
+key and journal (today resume is a step-id map, i.e. latest-wins) · cutting
+`needs:` · hardcoding `attempts:` · committing the attempt the panel approved *by
+index* rather than the last one generated · a stable emitted system prompt
+(runtime obligation 1).
 
 Fixed while writing this spec, both found by specifying rather than by a bug report:
 the input fold used a Go map range, so any step with 2+ scalar inputs produced
