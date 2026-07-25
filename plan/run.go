@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/valbaudo/aw"
@@ -77,9 +79,15 @@ func (r *Runner) runStep(ctx context.Context, p *Plan, s Step, done map[string]S
 	// Resolve declared inputs. A state ref (a workspace, an artifact) travels as
 	// a REF, so the backend materializes it properly; only a scalar is rendered
 	// into the prompt, because that is the only kind a model can read directly.
+	//
+	// SORTED, not a map range. A provider's prompt cache is keyed on the exact
+	// leading tokens, so a randomized fold order changes the prompt bytes on every
+	// run and silently defeats every cache hit. Measured before this was sorted:
+	// three inputs produced three distinct prompts across repeated runs.
 	prompt := s.Prompt
 	inputs := map[string]aw.Ref{}
-	for name, src := range s.Inputs {
+	for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
+		src := s.Inputs[name]
 		did, field, _ := parseFrom(src.From)
 		up := done[did]
 		if ref, ok := up.Produced[field]; ok {

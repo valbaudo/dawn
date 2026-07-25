@@ -216,3 +216,49 @@ func TestGateValidation(t *testing.T) {
 		t.Fatalf("valid gate rejected: %v", err)
 	}
 }
+
+// A provider's prompt cache is keyed on the exact leading tokens, so the input
+// fold MUST be deterministic. This was a real bug: `for name := range s.Inputs`
+// is a Go map range, randomized by construction, so any step with 2+ scalar
+// inputs got different prompt bytes on every run and never hit the cache.
+//
+// The loop matters — a single recomputation passes by luck roughly 1/n! of the
+// time it should fail.
+func TestInputFoldIsDeterministic(t *testing.T) {
+	p := &Plan{
+		Version: 1,
+		Agents:  map[string]Agent{"w": {Backend: "x", Model: "gen"}},
+		Steps: []Step{
+			{ID: "a", Agent: "w", Prompt: "A", Output: "text"},
+			{ID: "b", Agent: "w", Prompt: "B", Output: "text"},
+			{ID: "c", Agent: "w", Prompt: "C", Output: "text"},
+			{ID: "d", Agent: "w", Prompt: "D", Output: "text"},
+			{ID: "sink", Agent: "w", Prompt: "SINK", Inputs: map[string]Source{
+				"alpha":   {From: "steps.a.text"},
+				"bravo":   {From: "steps.b.text"},
+				"charlie": {From: "steps.c.text"},
+				"delta":   {From: "steps.d.text"},
+			}},
+		},
+	}
+	var first string
+	for i := 0; i < 100; i++ {
+		var seen []aw.Invocation
+		r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]aw.Backend{"gen": producer{seen: &seen}})}
+		if _, err := r.Run(context.Background(), p, nil); err != nil {
+			t.Fatal(err)
+		}
+		got := seen[len(seen)-1].Prompt // the sink step
+		if i == 0 {
+			first = got
+			if !strings.Contains(got, "alpha") || !strings.Contains(got, "delta") {
+				t.Fatalf("test is not exercising the fold; prompt was:\n%s", got)
+			}
+			continue
+		}
+		if got != first {
+			t.Fatalf("run %d differs from run 0 — the fold is not deterministic\n--- 0 ---\n%s\n--- %d ---\n%s",
+				i, first, i, got)
+		}
+	}
+}
