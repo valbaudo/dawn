@@ -88,7 +88,7 @@ concurrently inside the gate. If wall clock bites, `--jobs` is a *flag*, never a
 
 ---
 
-## 2 · Context — and why there is no session key
+## 2 · Context and caching
 
 **Default and only behavior: a fresh context for every invocation.** No key changes
 it. No inference from adjacency. **No session mechanism in the language.**
@@ -107,50 +107,68 @@ enforced** — zero lines of validation. Honest scope: aw cannot see inside a
 black-box CLI. `claude -p` still loads `CLAUDE.md`, tools and cwd context every
 call. The property is exactly *"the judge did not see the generator's transcript."*
 
-### Caching is a prefix property, not a session property
+### Caching is a prefix property
 
-An earlier draft of this section claimed sessions and caches are incompatible on TTL
-grounds ("~30-day transcript vs 5-minute cache"). **That was wrong, and it was a
-category error** — retention governs whether a prefix can be *reconstructed*; TTL
-governs whether blocks are *resident*; the ratio is meaningless. Every hit also
-slides the TTL forward, so it is a *gap* budget, not a run budget, and Claude Code
-requests the 1-hour TTL on a subscription anyway.
+A provider cache is keyed on the **exact leading tokens**, scoped to (org, model).
+Not on a conversation, not on a session id. Two unrelated invocations whose prompts
+begin with identical bytes share a hit; two turns of one session that begin with
+different bytes do not.
 
-Measured on this machine ([docs/caching-measurements.md](docs/caching-measurements.md)):
+This is measurable, and measured ([docs/caching-measurements.md](docs/caching-measurements.md)) —
+`claude -p`, `--model haiku`, a fixed ~8k-token block, `cc`/`cr` = cache created/read:
 
-- Three **sessionless** calls with a stabilized prefix, three unrelated session ids:
-  `cache_read` 0 → **25,830** → **25,830**. The cache is keyed on the **exact token
-  prefix**, not on a conversation.
-- The same calls against Claude Code's **default** preset cache nothing of the
-  caller's content: the preset drifts a few tokens per run (env, cwd, git status),
-  exact prefix matching invalidates everything after the drift point, and
-  `cache_creation` stays at ~20.5k **every call**.
-- `--fork-session` inherits **no** cache (reproduced twice, tightly timed). Fan-out
-  off a warmed session is not a money lever.
+| shape | cc | cr |
+|---|---|---|
+| sessionless, **stable** prefix, 3 unrelated session ids | 33,288 → 7,458 → 8,184 | 0 → **25,830** → **25,830** |
+| sessionless, Claude Code's **default** preset | ~20,501 **every call** | 20,215 flat |
+| `--resume` (linear session) | 295 → 71 | **40,716** → **41,011** |
+| `--fork-session` | ~20,033 | 20,215 flat |
+
+Read those four rows together and the rule falls out. Caching works **without any
+session** when the prefix is stable. It fails **with or without** a session when the
+prefix drifts — Claude Code's default preset moves a few tokens per run (env, cwd,
+git status), and since matching is exact, everything after the drift point
+recomputes. `--resume` appears to fix caching only because a resumed turn is a
+strict prefix extension of a prefix the provider already holds.
 
 > **A session is a workaround for an unstable prefix, not the caching mechanism.**
 
-So the money lever is a **runtime** responsibility, not a language key:
+Fan-out gets no help from sessions either: `--fork-session` inherits nothing
+(reproduced twice, tightly timed), because a fork diverges exactly where the
+breakpoint sits.
 
-- **Stabilize the prefix.** Pass an explicit system prompt rather than inheriting a
-  drifting preset. Keep byte-identical leading content across invocations of the
-  same model.
-- **Order the prompt shared-content-first.** Bound scalar inputs are appended in
-  sorted order, and the folding must be deterministic — a Go map range over three
-  inputs measured **3 distinct hashes in 200 runs**, which silently defeats every
-  cache hit.
-- **In the repair loop, append the critique, never prepend it.** Same model,
-  near-identical leading bytes, re-sent within seconds.
+TTL is a **gap** budget, not a run budget: every hit slides it forward, and Claude
+Code requests the 1-hour TTL on a subscription. It is unrelated to transcript
+retention, which governs whether a prefix can be *reconstructed* rather than whether
+its blocks are *resident*.
 
-**Per-vendor caveat, because the answer is not uniform.** Anthropic, droid, goose
-and opencode key the cache on the prefix alone. **OpenAI's `codex` is the
-exception**: `codex-rs/core/src/client.rs` sets `prompt_cache_key` from the session
-id with no author-settable override, and `New | Cleared | Forked` all mint a fresh
-one — so back-to-back `codex exec` runs lose routing affinity and `codex exec
-resume` is the only handle. That is an **adapter** concern, handled behind the
-`aw.Backend` seam, not a key in the plan.
+### What the runtime owes the cache
 
-**No `cache:` knob.** aw doesn't own the bytes that reach the provider. It ships
+The money lever is a **runtime obligation, not a language key**. Three rules, none of
+which an author writes:
+
+1. **Emit a stable prefix.** Pass an explicit system prompt; never inherit a drifting
+   preset. Leading bytes must be identical across invocations of the same model.
+2. **Shared content first, and fold deterministically.** Bound inputs are appended in
+   sorted order. A Go map range over three inputs measured **3 distinct hashes in 200
+   runs** — enough to defeat every hit, silently.
+3. **Append the repair critique, never prepend it.** Same model, near-identical
+   leading bytes, re-sent within seconds.
+
+### Per vendor, because the answer is not uniform
+
+| CLI | cache keyed on | session needed? |
+|---|---|---|
+| claude, droid, goose, opencode, gemini-cli | prefix | no |
+| **codex** | prefix **+ `prompt_cache_key`** | **yes, for routing affinity** |
+
+`codex-rs/core/src/client.rs` sets `prompt_cache_key` from the session id with no
+author-settable override, and `New`/`Cleared`/`Forked` each mint a fresh one — so
+back-to-back `codex exec` runs lose affinity and `codex exec resume` is the only
+handle. It degrades routing, it does not guarantee a miss. **This lives in the
+adapter, behind the `aw.Backend` seam — it is not a key in the plan.**
+
+**No `cache:` knob.** aw does not own the bytes that reach the provider. It ships
 ordering discipline plus `cache_read`/`cache_create` per step in the journal.
 **One measurement, no knob** — falsifiable, which a knob is not.
 
