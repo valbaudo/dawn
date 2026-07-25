@@ -1,17 +1,14 @@
 # The aw plan language
 
-**Status: design. Not all of it is built** — see [Delta](#delta-spec-vs-code).
+**Status: design.** The code implements an earlier, larger surface — see [Delta](#delta).
 
-A plan is a static DAG of agent invocations. One mechanism — a **named typed input** —
-carries every kind of state a step can need: a scalar, a JSON field, or a whole
-directory tree. There is no session, no templating, no control flow.
+A plan is a static DAG of agent invocations. One mechanism — a **named input** —
+carries every kind of state a step needs. No sessions, no templating, no control flow.
 
-**15 keys · 2 type forms · 2 reserved names · 2 commands.**
-
-Two rules underpin everything and must never be conflated:
+**10 keys · 2 type forms · 2 commands · 3 flags.**
 
 > **Work is input-addressed. Values are content-addressed.**
-> A step's identity is a claim about the *question asked*. A ref is a claim about the
+> A step's identity is a claim about the *question asked*; a ref is a claim about the
 > *bytes produced*. A cache hit means "we already paid for an **accepted** answer to
 > this exact question" — never "this is what the model produces."
 
@@ -19,158 +16,135 @@ Two rules underpin everything and must never be conflated:
 
 ## The whole language
 
-```
-version: 1                    strict parse; unknown keys are errors
-
-agents:
-  <name>:
-    backend: claude | claude-ws | …     default: claude
-    model:   <id>                       REQUIRED — no ambient defaults
-
-steps:
-  - id:      <name>                     unique
-    agent:   <agent name>
+```yaml
+steps:                        # the only top-level key
+  <step-id>:
+    agent:   <backend>/<model>          # both mandatory, no defaults
     prompt:  <text>
-    inputs:  {<name>: steps.<id>.<field>}   plain strings; one source only
-    output:  {<field>: string | [a,b,c]}    default: {text: string}
-    expect:  [<path>, …]                    workspace backends only
+    inputs:  {<name>: <step>.<field>}   # a tree if the field is `workspace`, else a scalar
+    outputs: {<field>: string | [a,b]}  # default: {text: string}
+    expect:  [<path>, …]                # filesystem postconditions
     gate:
-      judges:   [<agent name>, …]
+      judges:   [<backend>/<model>, …]
       criteria: <text>
-      quorum:   <int>                   default: n/2+1 (ties reject)
+      quorum:   <int>                   # default ⌊N/2⌋+1; ties reject
 ```
 
-Everything else is derived. `id` `agent` `prompt` `inputs` `output` `expect` `gate` ·
-`backend` `model` · `judges` `criteria` `quorum` · `version` `agents` `steps`.
+Ten keys: `steps` `agent` `prompt` `inputs` `outputs` `expect` `gate` `judges`
+`criteria` `quorum`.
 
-**Types.** `string`, or a YAML sequence which *is* an enum (`[low, medium, high]`).
-No numbers, booleans, arrays or nested records: the reference grammar stops at
-`steps.a.b`, so declaring depth buys nothing statically, and value constraints are
-`criteria:`'s job.
+**Types — two forms, closed.** `string`, or a sequence which *is* an enum
+(`[low, high]`). `outputs: {n: number}` is a load error. A sequence always means an
+enum, with no exceptions, so a reader needs no table.
 
-**Reserved.** A workspace step auto-produces `workspace` (the tree) and `diff` (its
-rendering); neither may be declared. The step id `in` is bound by `--in DIR`.
+**One rule for scalar vs tree:**
 
-**CLI.**
-```
-aw run <plan.yaml> [--dir .aw] [--in DIR] [--redo ID]… [--dry-run]
-aw show <step-id> [--into DIR]
-```
-Exit `0` accepted · `1` **gate refused** · `2` usage/parse/validate · `3` mechanical
-or permanent · `130` interrupted. Unattended means something reads `$?`, and the
-distinction nothing else gives you is *the panel refused* vs *the machine broke*.
+> **`workspace` is the only field name that materializes. Everything else binds as a scalar.**
+
+`inputs: {repo: build.workspace}` is a directory; `inputs: {bug: audit.summary}` is
+text. At most one workspace input per step, and it becomes the step's **working
+directory** — so a mount path is never written into a prompt. Scalars are appended by
+the engine as labeled blocks. Nothing is substituted into prompt text; there is nowhere
+a `{{ }}` could go.
+
+**Reserved.** A tree-capturing step auto-produces `workspace` and `diff`: referenceable,
+never declarable. The step id `in` is reserved and filled by `--in DIR`.
+
+---
+
+## Fixed by the engine, so they are not keys
+
+- **References are two segments**, `<step>.<field>`, resolved at load against the
+  upstream's declared `outputs:` plus the reserved names. Step ids are `[a-z0-9_-]+`, so
+  a `.` can never make a reference ambiguous.
+- **Repair is bounded at 3.** A bounded loop is the requirement; a tunable one is not.
+  `attempts` is already excluded from the identity key — a result accepted under 3
+  attempts is equally accepted under 5, which is policy — so fixing it changes no cache
+  behavior and makes the cost preview exact.
+- **A judge sees** `{prompt, inputs, captured outputs, criteria}` in a fresh context,
+  against an engine-fixed verdict schema. No syntax could hand it the generator's
+  transcript.
+- **Crash ≠ verdict.** A mechanical judge failure propagates; it never consumes an
+  attempt and never reads as approval.
+- **Identity** = hash(step id, backend, model, prompt, resolved `outputs`, `expect`,
+  resolved `gate`, resolved input values/refs). Rewind and redo need no key.
+- **Unknown keys, unknown output fields and duplicate step ids are parse errors.**
+  Duplicates come free from the map form — verified: yaml.v3 reports
+  `line 4: mapping key "fix" already defined at line 2`.
 
 ---
 
 ## 1 · Declaration
 
-An **agent** declares who runs. A **step** declares what to ask (`prompt`), what it
-will produce (`output`, `expect`), and what it needs (`inputs`).
+An **agent** is a 2-tuple written as one string: `claude/claude-opus-4-6`. There is no
+`agents:` block, because a name pointing at a 2-tuple is indirection carrying zero
+information. Verified: slash-bearing ids (`openrouter/anthropic/claude-opus`) decode as
+plain scalars in block and flow context alike.
 
-`output:` desugars to JSON Schema with `additionalProperties: false` and **every
-declared field required** — always, implicitly. The author never writes those two
-keywords, which makes the rule unviolatable rather than merely documented.
+The cost is real, and paid where it helps. Swapping a judge model everywhere becomes a
+`sed` or a YAML anchor rather than a one-line edit. In exchange,
+`judges: [claude/opus-4-6, claude/sonnet-4-6, claude/haiku-4-5]` shows the panel is
+independent **at the point of use**, where `judges: [j1, j2, j3]` makes you scroll.
 
-**There are no optional fields.** That is what makes the static guarantee a theorem:
+`outputs:` compiles to JSON Schema with `additionalProperties: false` and **every field
+required**, always. The author never writes those two, which makes the rule unviolatable
+rather than documented. **There are no optional fields**, and that is what makes the
+load-time guarantee a theorem:
 
 ```
-load time  : the referenced field exists in the schema
+load time  : the referenced field is declared upstream
 runtime    : the output conforms
 conformance: every declared field is present
-⟹ a reference that passes load time can never resolve to a missing value
+⟹ a reference that loads can never resolve to a missing value
 ```
 
-Optional fields would reintroduce GitHub Actions' silent-empty-string hole. Want
-"maybe empty"? Declare the field; let the agent write `""`.
-
-Runs are **sequential**. The jury is the only fan-out, and it already runs
-concurrently inside the gate. If wall clock bites, `--jobs` is a *flag*, never a key.
+Runs are sequential. The jury is the only fan-out, and it already runs concurrently.
 
 ---
 
 ## 2 · Context and caching
 
-**Default and only behavior: a fresh context for every invocation.** No key changes
-it. No inference from adjacency. **No session mechanism in the language.**
+**Every invocation gets a fresh context.** No session key, no inference from adjacency.
 
-Two arguments, both structural:
-
-1. **A session would kill the gate.** A judge inheriting the generator's transcript
-   is not independent — and it fails *silently*: the judge still returns
-   `approved: true`, so the run goes green while the differentiator is dead.
-2. **A session makes a step's inputs undeclared.** Step 7 would depend on step 3
-   with no edge in the DAG, which breaks rewind: replaying step 7 would mean
-   reconstructing a conversation the log never described.
-
-Because there is no session syntax anywhere, gate isolation is **structural, not
-enforced** — zero lines of validation. Honest scope: aw cannot see inside a
-black-box CLI. `claude -p` still loads `CLAUDE.md`, tools and cwd context every
-call. The property is exactly *"the judge did not see the generator's transcript."*
+Two structural reasons: a judge inheriting the generator's transcript is not
+independent, **and it fails silently green**; and an implicit session makes a step's
+inputs undeclared, which breaks rewind. Because no session syntax exists, gate isolation
+is structural — zero lines of validation.
 
 ### Caching is a prefix property
 
-A provider cache is keyed on the **exact leading tokens**, scoped to (org, model).
-Not on a conversation, not on a session id. Two unrelated invocations whose prompts
-begin with identical bytes share a hit; two turns of one session that begin with
-different bytes do not.
+A provider cache is keyed on the **exact leading tokens**, scoped to (org, model) — not
+on a conversation. Measured
+([docs/caching-measurements.md](docs/caching-measurements.md)):
 
-This is measurable, and measured ([docs/caching-measurements.md](docs/caching-measurements.md)) —
-`claude -p`, `--model haiku`, a fixed ~8k-token block, `cc`/`cr` = cache created/read:
-
-| shape | cc | cr |
+| shape | cache_create | cache_read |
 |---|---|---|
 | sessionless, **stable** prefix, 3 unrelated session ids | 33,288 → 7,458 → 8,184 | 0 → **25,830** → **25,830** |
 | sessionless, Claude Code's **default** preset | ~20,501 **every call** | 20,215 flat |
-| `--resume` (linear session) | 295 → 71 | **40,716** → **41,011** |
+| `--resume` (linear session) | 295 → 71 | **40,716** |
 | `--fork-session` | ~20,033 | 20,215 flat |
 
-Read those four rows together and the rule falls out. Caching works **without any
-session** when the prefix is stable. It fails **with or without** a session when the
-prefix drifts — Claude Code's default preset moves a few tokens per run (env, cwd,
-git status), and since matching is exact, everything after the drift point
-recomputes. `--resume` appears to fix caching only because a resumed turn is a
-strict prefix extension of a prefix the provider already holds.
+Caching works **without any session** when the prefix is stable, and fails **with or
+without** one when it drifts — the default preset moves a few tokens per run (cwd, env,
+git status) and matching is exact. `--resume` only appears to fix it because a resumed
+turn is a strict prefix extension.
 
 > **A session is a workaround for an unstable prefix, not the caching mechanism.**
 
-Fan-out gets no help from sessions either: `--fork-session` inherits nothing
-(reproduced twice, tightly timed), because a fork diverges exactly where the
-breakpoint sits.
+Fan-out gets no help either: `--fork-session` inherits nothing.
 
-TTL is a **gap** budget, not a run budget: every hit slides it forward, and Claude
-Code requests the 1-hour TTL on a subscription. It is unrelated to transcript
-retention, which governs whether a prefix can be *reconstructed* rather than whether
-its blocks are *resident*.
+**What the runtime owes the cache** — obligations, not keys: emit a stable system
+prompt; put shared content first and fold inputs deterministically; append the repair
+critique, never prepend. Measured after implementing these: two unrelated plans sharing
+a ~6k-token prefix, `cache_read` 0 → **17,929**.
 
-### What the runtime owes the cache
+**Per vendor.** claude, droid, goose, opencode and gemini-cli key on the prefix alone.
+**codex is the exception** — `prompt_cache_key` comes from the session id with no
+override, so `codex exec resume` is the only handle. That lives in the adapter, not the
+plan.
 
-The money lever is a **runtime obligation, not a language key**. Three rules, none of
-which an author writes:
-
-1. **Emit a stable prefix.** Pass an explicit system prompt; never inherit a drifting
-   preset. Leading bytes must be identical across invocations of the same model.
-2. **Shared content first, and fold deterministically.** Bound inputs are appended in
-   sorted order. A Go map range over three inputs measured **3 distinct hashes in 200
-   runs** — enough to defeat every hit, silently.
-3. **Append the repair critique, never prepend it.** Same model, near-identical
-   leading bytes, re-sent within seconds.
-
-### Per vendor, because the answer is not uniform
-
-| CLI | cache keyed on | session needed? |
-|---|---|---|
-| claude, droid, goose, opencode, gemini-cli | prefix | no |
-| **codex** | prefix **+ `prompt_cache_key`** | **yes, for routing affinity** |
-
-`codex-rs/core/src/client.rs` sets `prompt_cache_key` from the session id with no
-author-settable override, and `New`/`Cleared`/`Forked` each mint a fresh one — so
-back-to-back `codex exec` runs lose affinity and `codex exec resume` is the only
-handle. It degrades routing, it does not guarantee a miss. **This lives in the
-adapter, behind the `aw.Backend` seam — it is not a key in the plan.**
-
-**No `cache:` knob.** aw does not own the bytes that reach the provider. It ships
-ordering discipline plus `cache_read`/`cache_create` per step in the journal.
-**One measurement, no knob** — falsifiable, which a knob is not.
+**No `cache:` knob.** aw owns ordering and reports `cache_read`/`cache_create` per step
+in the journal. One measurement, no knob — falsifiable, which a knob is not.
 
 ---
 
@@ -178,361 +152,269 @@ ordering discipline plus `cache_read`/`cache_create` per step in the journal.
 
 ```yaml
 inputs:
-  draft: steps.triage.summary     # a plain string
+  bug: audit.summary
 ```
 
-**Two checks, both mandatory.** This is the line between systems that work (Bazel
-analysis, Nix `.drv`, dbt `ref()`) and ones that bite at 3am (GH Actions: a
-nonexistent property is the empty string; Airflow XCom: a runtime dict lookup).
+**Two checks, both mandatory.** This is the line between systems that work (Bazel, Nix,
+dbt) and ones that bite at 3am (GitHub Actions: a nonexistent property is the empty
+string).
 
-**Load time** — zero processes spawned, before a token is spent:
-1. the value is exactly `steps.<id>.<field>` — two dots, nothing else
-2. `<id>` is a declared step (or `in`); the error lists known ids
-3. `<field>` is in that step's declared output, or a reserved name; the error lists
-   what the step actually declares
-4. reserved names aren't declarable; `in` isn't a usable step id
-5. a workspace input on a text agent is an error; so is `expect:` on one
-6. the reference graph is acyclic
-7. judges name declared agents; quorum ∈ 1..n; every agent declares a model
+**Load time**, before a token is spent: the reference is exactly `<step>.<field>`; the
+step exists; the field is declared upstream or reserved; the graph is acyclic; judges
+are well-formed; quorum ∈ 1..N; `expect:` only on a tree-capturing backend.
 
-**Runtime** — after the agent returns, **before the step commits**: strict-parse,
-verify every declared field present, kinds match, enums are members, **no undeclared
-fields**. Any failure rejects the output whole. No coercion, no partial acceptance —
-a stray key means the model improvised, and improvisation means the rest is
-untrustworthy. ~10 lines of stdlib over a `map[string]any`; not a JSON Schema
-dependency.
-
-Schemas are pushed natively where supported (`claude --json-schema`) and appended to
-the prompt otherwise. **Push-down is an optimization, never the authority** — the
-local validator re-checks on every backend, always.
-
-**A schema violation is a third thing.** Not a crash (the process exited 0), so
-retrying spins forever. Not a verdict (no judge ran), so charging it to the gate
-budget would burn a repair attempt on something nobody evaluated — the exact
-accounting corruption *crash ≠ verdict* exists to prevent. **The step fails, exit 3.**
-The retry is `aw run` again, and the journal means you re-pay one step, not the run.
+**Runtime**, after the agent returns and *before* the step commits: strict-parse, every
+declared field present, enum values members, **no undeclared fields**. Any failure
+rejects the output whole — a stray key means the model improvised.
 
 **Order of operations, non-negotiable:**
 ```
-invoke → [capture tree + assert expect] → schema-validate → jury → commit
+invoke → capture tree + assert expect → validate → jury → commit
 ```
 A non-conforming candidate never reaches a judge. Neither does a step that failed to
-produce a declared path. The judge's own verdict goes through the same validator
-against `{approved: boolean, reason: string}` — that is the mechanism enforcing
-*crash ≠ verdict*.
+produce a declared path.
 
-**No templating.** No `{{ }}`, no jq, no CEL. Scalars are **bound**, not substituted:
-one labeled block appended per non-ref input. This single decision deletes the
-interpolation rules, the undefined-variable check, and the whole rendering path.
-
-**`needs:` is cut** — not taste, a defect. It carries no data, so it can't be in the
-identity key; so adding `needs: [smoke]` to a committed `publish` leaves the key
-unchanged, `publish` is a cache **hit**, and the ordering you just declared silently
-never takes effect. Every ordering constraint is expressible as a data edge (every
-step produces at least `text`), which lands it *in* the key and lets the downstream
-agent actually see the upstream verdict.
+A **schema violation** is a third thing: not a crash (the process exited 0), not a
+verdict (no judge ran). The step fails; the retry is `aw run` again, which re-pays one
+step rather than the run.
 
 ---
 
-## 4 · Binaries and pictures
+## 4 · Artifacts
 
-**The tree is the artifact channel.** There is no second namespace. `dist/aw`
-written by `build` is read at `dist/aw` by `smoke` — producer path equals consumer
-path, so the prompt can name the path the agent already used.
+The tree is the only artifact channel, and **producer path equals consumer path** —
+`dist/aw` written by `build` is read at `dist/aw` by `smoke`. Every tree-capturing step
+gets its own scratch dir: materialize inputs → run → capture → discard. The host
+filesystem is never touched.
 
-**Every workspace step gets its own scratch dir**: mkdtemp → materialize declared
-inputs → run → capture tree → remove. Never a shared mutable tree; the host
-filesystem is never touched. That's Bazel's execroot, and it's already the shape of
-the code.
-
-**`expect:` is a mechanical postcondition**, and it's four load-bearing lines:
+`expect:` is a postcondition, and two lines of git give both halves:
 
 ```
 git add -A                  # everything; .gitignore honored
-git add -f -- <expect…>     # declared paths, .gitignore overridden,
-                            #   and errors if one was never produced
-git write-tree
+git add -f -- <expect…>     # forced past .gitignore, and errors if never produced
 ```
 
-Verified, not hypothetical: with `dist/` in `.gitignore`, `git add -A` produces a
-tree where `<tree>:dist/aw` is **absent** — the flagship artifact silently missing.
-`add -f --` fixes it and fails loudly on a path that was never written. Because
-capture runs inside the invocation, a missing artifact fails **before a judge is
-paid**.
+Verified: with `dist/` ignored, plain `add -A` yields a tree where `dist/aw`
+**does not exist** — the flagship artifact silently absent.
 
-**Undeclared files are kept but not asserted** — a deliberate deviation from
-Bazel/Nix, which discard them. Their contract is hermetic reproducibility; aw's tree
-is both the evidence the gate judges and the thing rewind reads, and a black-box
-agent writes `.claude/`, `node_modules` and logs by design.
+**A missed `expect:` path is a rejection, not a crash.** Under a gate it feeds repair
+with "you did not produce X" and consumes an attempt at **zero judge tokens**; ungated,
+it fails the step. Every other capture error stays mechanical.
 
-**The host tree enters via `aw run --in DIR`, not a key.** Captured once at run
-start, referenced as `steps.in.workspace`. Keeping the path out of the file matters:
-the file's bytes are the plan's identity. And because the capture is
-content-addressed, editing your source re-runs its consumers — Bazel/Nix input
-hashing, for free.
+The host tree enters via `--in DIR`, never a key, so no machine-specific path lives in
+the file whose bytes are the plan's identity.
 
-> **The panel judges a rendering, not bytes.** `git diff` renders a changed 200KB
-> binary as one sentence: *"Binary files a/dist_aw and b/dist_aw differ."* A panel
-> gated on "the tool must be correct" votes on that sentence. Mitigations:
-> `--stat --patch` so the panel always sees path/mode/size, and a 128KB body cap
-> whose marker is **in the text the judges read** (silent truncation means approving
-> work you didn't see). **To gate an artifact's content, declare a text rendering of
-> it as an output field and write the criteria against that.** Zero keys.
+> **The panel judges a rendering, not bytes.** `git diff` renders a changed 200KB binary
+> as one sentence. To gate an artifact's *content*, declare a text rendering of it as an
+> output field and write the criteria against that.
 
 ---
 
 ## 5 · Rewind and redo
 
-**Resume is deleted as a concept.** `aw run` computes each step's key in topological
-order; if the journal holds an accepted entry for that key, reuse its ref and skip.
-Re-running the same command *is* the resume — no mode, no flag, no second code path,
-and the safest path is the one exercised every run.
+**Resume is deleted as a concept.** `aw run` computes each key in topological order and
+skips what the journal already holds. Re-running *is* the resume — one code path,
+exercised every run rather than only after a crash.
 
-```
-key = sha256(canonical JSON of {
-    v, id, backend, model, prompt,
-    output (resolved), expect (sorted),
-    inputs: {name → resolved ref URI, or resolved scalar},
-    gate: {judges sorted, criteria, quorum resolved}
-})
-```
-
-Bazel's action key with aw's nouns: the prompt is the command line, input refs are
-the Merkle inputs, backend+model is the toolchain. The key hashes the **resolved**
-definition, so writing a default explicitly (`quorum: 2` over two judges) is free.
-
-**Not in the key:** wall clock, run id, hostname, cwd, PID, attempt number, prior
-verdicts, tokens, cost, the plan file as a whole, any other step, the agent CLI
-version. Anything per-run makes every run a miss; anything global makes every edit a
-global miss.
-
-**Only gate-accepted results serve a hit.** A rejection is recorded for forensics but
-carries no ref — the model is nondeterministic, so the honest response to "this was
-rejected last night" is to run it again. A mechanical failure commits nothing, or an
-infrastructure blip becomes a permanent verdict.
+**Not in the key:** wall clock, run id, hostname, cwd, PID, attempt number, tokens,
+cost, the plan file as a whole, any other step, the agent CLI version.
 
 | change | invalidates |
 |---|---|
-| prompt / model / backend / output / expect | that step + descendants |
-| gate judges, criteria, or quorum | that step + descendants |
-| writing a default explicitly | nothing |
+| prompt / model / backend / outputs / expect / gate | that step + descendants |
+| writing a default explicitly, reordering judges | nothing |
 | the `--in` tree | its consumers + descendants |
-| reordering steps, judges, or expect paths | nothing |
-| add a step | only it |
-| delete a step | nothing (lines orphan) |
 | upstream re-ran, same bytes | descendants skipped |
 | gate rejected last run | that step re-runs |
-| agent CLI upgraded | nothing; one-line warning |
 
-**Rewind is a read, not a state transition.** Every committed step is immutable and
-content-addressed, so "the state as of step X" is a lookup: `aw show X --into DIR`.
-Terraform needs plan/apply/taint because it mutates a live world; aw's outputs are
-immutable bytes. Going forward differently is `--redo ID`; downstream invalidation
-isn't a feature, it falls out of keying on input refs. No `--from X` — "from"
-presumes a total order and a DAG has only a topological one.
+**Only gate-accepted results serve a hit.** A rejection is recorded with no ref — the
+model is nondeterministic, so the honest answer to "this was rejected last night" is to
+run it again. A mechanical failure commits nothing.
 
-**Guaranteed:** a key never serves a result whose defining bytes differ; nothing the
-gate didn't accept is reused; a crash loses at most the in-flight step; the journal
-is append-only; a second `aw run` with no edits does zero paid work.
-**Not guaranteed:** reproducibility (`--redo` yields different text — aw guarantees
-*skip*, not *sameness*); detection of change outside the key (model drift, network
-the agent read).
+**Rewind is a read**, not a state transition: every committed step is immutable, so "the
+state as of X" is a lookup. Going forward differently is `--redo`.
 
-The right prior art for an impure step is Nix's **fixed-output derivation**: an
-impure builder made safe not by determinism but by a declared predicate over its
-output. **aw's gate is that predicate, with jury quorum replacing hash equality** —
-a hash accepts one exact output, a jury accepts an equivalence class. Subject to the
-rendering limit above.
+The **journal** is one append-only JSONL. Two fields are load-bearing, `key` and `ref`;
+the rest is provenance and is never hashed. Blob first, then the line — a crash between
+them leaves an orphan blob, never a pointer to bytes that do not exist.
 
-**The journal** is one append-only `.aw/journal.jsonl`. Two load-bearing fields,
-`key` and `ref`; everything else is provenance and is never hashed. Blob first
-(fsync), then append (fsync) — a crash between them leaves an orphan blob (harmless
-garbage), never a dangling pointer. The journal is also the event stream.
+The right prior art for an impure step is Nix's **fixed-output derivation**: an impure
+builder made safe by a declared predicate over its output. **The gate is that predicate,
+with jury quorum replacing hash equality** — a hash accepts one output, a jury accepts an
+equivalence class.
 
 ---
 
 ## 6 · Switching agents
 
-With no session in the language, **this question has no mechanism to refuse** — which
-is the point.
-There is no native handle in the language, so there's nothing to mistranslate and no
-cross-vendor rule to write.
-
-**Portable context is an ordinary step:**
-
-```yaml
-- id: handoff
-  agent: writer
-  inputs: {summary: steps.triage.summary, diff: steps.build.diff}
-  prompt: |
-    Write a brief for an assistant that has not seen this work: decisions,
-    constraints, rejected alternatives, open questions, current state.
-  output: {brief: string}
-
-- id: port
-  agent: porter                  # different vendor
-  inputs: {brief: steps.handoff.brief}
-```
-
-Nobody ports a native handle, and nobody should pretend to: a transcript's on-disk
-format is private, version-unstable, keyed to a working directory, and carries a
-model identity — vendor blocks get dropped even between models of the *same* vendor.
-There's no fidelity claim aw could test, so there's no promise aw should make.
-
-The payoff: a brief is content-addressed, diffable, schema-validated, **gate-able**
-and replayable. A vendor transcript is none of those. **Q2 and Q6 have the same
-answer, and it costs zero keys.**
+There is no session in the language, so there is nothing to port and nothing to refuse.
+Portable context is an ordinary step whose output is a handoff brief, consumed by a step
+naming a different vendor. Unlike a transcript, a brief is content-addressed, diffable,
+schema-validated, **gate-able** and replayable.
 
 ---
 
-## 7 · The rest, at zero keys
+## 7 · Fan-out
 
-- **Timeouts** — hardcoded 30m per invocation. `proc/` already kills process groups
-  and nothing drives it; unattended plus no timeout means one hung tool call burns
-  the night. That gap is in the runtime, not the language. `--timeout` is a flag if
-  someone asks.
-- **Gate attempts** — hardcoded 3. A result accepted under 3 attempts is equally
-  accepted under 5; that's the definition of policy, and policy is a flag.
-- **Retries** — none. The retry is `aw run` again; the journal means you re-pay one
-  step.
-- **Secrets** — never a value in the file. The agent CLI reads its own credentials.
-- **Signals** — SIGINT stops launching, cancels children as process groups, exit 130.
-  Nothing to flush; commit already happened per step.
-- **Agent version** — recorded in the journal, `DISABLE_AUTOUPDATER=1` for children,
-  one-line warning when a hit's recorded version differs. **Not** in the key: hashing
-  the toolchain turns every background auto-update into a full re-run.
-- **`--dry-run`** — prints topological order, fresh/stale/unknown, worst-case
-  invocation count. No "reason" column: a hash tells you MISS, not WHY.
+**The money question needs no language support.** Because the cache is prefix-keyed, N
+same-model invocations sharing an opening block all hit it — no session, no construct.
 
----
-
-## 8 · Fan-out, and where the line is
-
-Two questions get conflated here. Separating them dissolves most of the problem.
-
-**The money question needs no language support.** Because the cache is keyed on the
-leading tokens (§2), N same-model invocations that begin with an identical block all
-hit that block, with no session and no construct. Fan-out is cache-efficient when
-the runtime puts shared content first and per-item content last — obligations 1 and
-2, which apply to every step anyway. There is no session-shaped shortcut to reach
-for either: `--fork-session` measurably inherits nothing.
-
-**The language question is refused in v1**, and the reason is not "loops are scary":
+**The language question is refused**, and not because loops are scary:
 
 > Fan-out without fan-in is useless, and fan-in is where the predecessor ballooned.
 
-A `map:` key immediately owes answers to: how is one instance's output referenced;
-how are *all* instances' outputs referenced; what type is that collection when the
-type vocabulary is `string | [enum]`; what happens when instance 7 of 20 fails or
-its gate refuses; does the reduce step see partial results; what is the identity key
-of a reduce whose inputs are a set. In the predecessor those questions produced
-`map`, `reduce`, `prune`, `quorum`, and a cross-cutting rule about what a value
-*means* after it crosses `gate → map → reduce → resume`. That is the combinatorial
-cost this rebuild exists to escape.
+A `map:` key immediately owes answers to: how one instance is referenced, how *all* are,
+what type that collection is under a two-form vocabulary, what happens when instance 7 of
+20 has its gate refuse, and what the identity key of a reduce over a *set* is.
 
-**Where the line sits, for when it is revisited.** Cardinality is the whole test:
+The line is **cardinality**: known at authoring time (write N steps) works today; known
+at load time *could* be data; known only after a step runs is a program. The one fan-out
+that already exists needs no key — **the jury**, which fans to N judges and reduces by
+quorum. Its fan-in rule is fixed, which is exactly why it can be data.
 
-| shape | cardinality known | verdict |
-|---|---|---|
-| N steps written out | at authoring time | works today |
-| `over:` a declared literal list | at load time | *could* be data |
-| `over:` a runtime-produced array | only after a step runs | a program |
+---
 
-Only the middle row is arguable, and even it must earn its keep against the reduce
-problem above. The bottom row breaks three properties at once: `--dry-run` cannot
-count the bill, the reference grammar has no way to name instance *k*, and the
-identity key of the fan-in is not computable until the fan-out has run.
+## The CLI
 
-**What to do today:** write the N steps. It is more lines and it is honest lines —
-each one is independently keyed, independently gated, independently resumable, and
-visible in `--dry-run`. And note the one fan-out that already exists needs no key at
-all: **the jury**, which fans a candidate to N judges concurrently and reduces by
-quorum. That is a fan-out with a fixed fan-in rule, which is exactly why it can be
-data instead of syntax.
+```
+aw run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]…
+aw show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]…
+
+REF ::= <step>[.<field>]     the plan's own grammar, same code path as a load-time check
+```
+
+Both commands take all three flags; there is no flag legal on one and not the other.
+
+**`aw show PLAN` with no REF is the dry run**: per-step fresh/stale plus the worst-case
+bill. `--dry-run` is deleted because "a mode of run that does not run" always grows a
+second identity-resolution path inside `run`; this way `run` *is* `show` plus executing
+the stale frontier. `--redo` works on `show`, which is what makes "what would forcing
+this step cost?" expressible.
+
+Two honest limits on the preview: the bill is exact in **calls** but a range in dollars
+(nobody knows output tokens before running), and everything past the first stale step is
+`unknown` rather than `stale`, because a step's key depends on its upstream's resolved
+output.
+
+**`aw show PLAN REF` writes to stdout** — `aw show p.yaml fix.workspace | tar -x -C out/`.
+No `--into`, because `--into` is the first flag of a family ending in
+`--strip-components`, `--only`, `--list`: tar, reimplemented badly.
+
+Exit `0` accepted · `1` **gate refused** · `2` usage/parse/validate · `3` mechanical ·
+`130` interrupted. Unattended means something reads `$?`, and the distinction nothing
+else gives you is *the panel refused* vs *the machine broke*.
+
+---
+
+## Worked example
+
+```yaml
+steps:
+  audit:
+    agent: claude/claude-opus-4-6
+    prompt: Find the single worst correctness bug in the CSV parser. Do not fix it.
+    inputs: {repo: in.workspace}
+    outputs:
+      bug:      string
+      severity: [low, high]
+
+  fix:
+    agent: claude-ws/claude-sonnet-4-6      # ws: the editing posture, a word you typed
+    prompt: Fix the bug named in `bug`. Keep the public API. Add one regression test.
+    inputs:
+      repo:     in.workspace
+      bug:      audit.bug
+      severity: audit.severity
+    outputs: {summary: string}
+    expect:
+      - csv/parser.go
+      - csv/parser_test.go
+    gate:
+      judges: [claude/opus-4-6, claude/sonnet-4-6, claude/haiku-4-5]
+      criteria: |
+        Accept only if the diff fixes the described bug, exported identifiers are
+        unchanged, and the new test fails against the old parser.
+      quorum: 3
+
+  note:
+    agent: claude/claude-haiku-4-5
+    prompt: Write one changelog line for the accepted fix. Imperative mood.
+    inputs: {what: fix.summary}
+    outputs: {line: string}
+```
+
+```sh
+aw show plan.yaml --in ~/src/csvtool          # what is stale, and the call count
+aw run  plan.yaml --in ~/src/csvtool          # run; re-run == resume
+aw run  plan.yaml --in ~/src/csvtool --redo fix
+aw show plan.yaml note.line                   # read a committed value
+aw show plan.yaml fix.workspace | tar -x -C out/
+```
 
 ---
 
 ## Refused
 
-Each is a parse error with a one-sentence message naming the alternative.
+Each is a parse error naming the alternative.
 
 | refused | why |
 |---|---|
-| `if:` `when:` `unless:` | changes *which* steps run; a gate could silently not run |
-| `loop:` `while:` `until:` | data-dependent iteration plus a feedback edge |
-| `map:` `foreach:` `each:` | deferred — see open questions |
-| `on:` `schedule:` `cron:` | aw is invoked; cron invokes it |
-| `needs:` | use a data edge; then every edge is in the key |
+| `if:` `when:` `loop:` `until:` | changes *which* steps run; a gate could silently not run |
+| `map:` `foreach:` | deferred — §7 |
+| `needs:` | use a data edge; then every edge is in the identity key |
 | `session:` `context:` | §2 |
 | `dir:` | `--in DIR`; keeps host paths out of the plan's identity |
-| `timeout:` `attempts:` | execution policy — hardcoded, flags if asked |
-| `files: {name: path}` | `expect: [path]`; the tree is the channel |
+| `timeout:` `attempts:` | execution policy — hardcoded, flags if ever asked |
+| `files:` | `expect:`; the tree is the channel |
 | `continue_on_error:` | fail-closed **is** the product |
 | `{{ }}` `${{ }}` | scalars are bound as inputs, never substituted |
 | `inputs:` under `gate:` | this is the gate-isolation rule |
-| `output: {n: number}` | two type forms: `string` \| `[enum]` |
+| `outputs: {n: number}` | two type forms: `string` \| `[enum]` |
+| a path-typed output (`x: ./file`) | see below |
+
+**Considered and reverted.** Making `outputs:` path-typed so it absorbs `expect:` was the
+biggest available cut (10 → 9 keys) and failed on three independent counts. It breaks
+`Validate`'s totality — a path field is backend-produced and never appears in the model's
+reply, so every workspace step dies on attempt 1. The fix is a `./` prefix test
+re-derived in three places that must agree forever. And `git add -f -- ./` force-adds
+everything `.gitignore` excludes, pulling `node_modules` into the store. It also moves a
+**privilege** boundary into a value prefix: adding `repo: ./` would silently promote a
+prompt-to-JSON call into a file-editing agent. `claude-ws` is the visible word for that,
+and a posture that dangerous should be a word an author typed.
 
 ---
 
 ## Open questions
 
 1. **Memoized impurity over time.** The key is a claim about the question, not the
-   answer, so an accepted result from March is served against a July model that
-   drifted — and *because it's a hit, the gate never re-runs*. Every mitigation costs
-   real: a TTL puts wall clock in the key (Make's disease); re-judging every hit pays
-   the jury forever. **Stance:** record version + timestamp, warn on divergence; if
-   it bites, `--max-age` as an input to the *lookup rule*, never a key component.
+   answer, so an accepted result from March is served against a July model — and
+   *because it is a hit, the gate never re-runs*. Stance: record version + timestamp,
+   warn on divergence; if it bites, `--max-age` as an input to the *lookup rule*, never a
+   key component.
 2. **Which criteria are actually judgeable.** "The diff must not delete tests" is
-   enforceable; "the tool is correct" is not; both compile to the same YAML. No
-   mechanical check, and I'm not inventing one — the fix is a manual section of
-   worked criteria.
-3. **The 128KB evidence cap is a guess.** Measure against a real repair loop. It's a
-   constant, not a key, so changing it invalidates nothing.
-4. **No re-ask is an unmeasured bet.** With native schema push-down, violations
-   should be near zero. For a CLI without it the schema arrives as prompt text and
-   the conformance rate is unknown. Measure before the second backend lands; the fix
-   is a hardcoded 1, not a key.
-5. ~~Fan-out~~ — **settled, see §8.** Refused in v1 because fan-out without fan-in is
-   useless and fan-in is where the predecessor ballooned. The cache motivation for it
-   dissolved: prefix ordering already makes same-model fan-out cache-efficient with
-   no construct at all.
-6. **The `--jobs` question.** Runs are sequential (§1) and the jury is the only
-   concurrency. That is right for a first version — it deletes journal interleaving
-   and rate-limit meltdowns — but an unattended overnight run of a 12-step plan pays
-   for it in wall clock. Revisit as a flag, with a measured number, once a real plan
-   is slow rather than hypothetically slow.
+   enforceable; "the tool is correct" is not; both compile to the same YAML. The fix is a
+   manual of worked criteria, not a feature.
+3. **Sequential execution.** The jury is the only concurrency. Right for a first version;
+   revisit `--jobs` with a measured number when a real plan is slow.
+4. **`--in` is required for `aw show PLAN`** (pricing needs the input digest) but optional
+   for `aw show PLAN REF` (reading a committed artifact must not need live host state).
+   Documented rather than papered over.
 
 ---
 
-## Delta: spec vs code
+## Delta
 
-Built today: `version` `agents` `steps` `id` `agent` `prompt` `gate`
-(judges/criteria/quorum/attempts) · **`output:` as a typed field map** with both
-type forms, defaulting to `{text: string}`, compiling to strict JSON Schema and
-re-validated locally on every backend · **`inputs:` as plain
-`steps.<id>.<field>` strings**, resolved by kind (ref → `Invocation.Inputs`,
-scalar → prompt) · **load-time field checking** (a reference to an undeclared
-field fails before a token is spent) · reserved-name rules · cycle checks ·
-per-step scratch dirs · tree capture/materialize · fail-closed gates ·
-process-group timeouts · **deterministic sorted input folding** (runtime
-obligation 2 — was a real bug, see below) · **the identity key** (resolved
-definition + resolved input refs; explicit defaults and judge order are free;
-`attempts` is excluded) · **the append-only journal** (`--dir`, blob-then-line,
-only an accepted result carries a ref, so a rejection is recorded and never
-reused) · **`--redo`** · exit 1 for a refusing panel vs 3 for a mechanical
-failure · **`expect:`** (forced past `.gitignore`, asserted at capture, before
-the diff and before any judge is paid; rejected up front on a backend that
-captures no tree) · **committing the panel-approved attempt by index** ·
-**runtime obligation 1** (an explicit stable `--system-prompt` on the text
-backend, `--exclude-dynamic-system-prompt-sections` on the workspace backend
-which needs the default preset for its file tools) · **per-step token counts in
-the journal**, so the money lever is falsifiable rather than asserted.
+The code implements the **earlier 15-key surface**: `version:`, an `agents:` block with
+`backend:`/`model:`, `steps:` as a sequence with `id:`, `steps.`-prefixed references,
+`output:` singular, and `attempts:`.
 
-Not yet: `--in` · `--dry-run` · `aw show` · cutting `needs:` · hardcoding
-`attempts:`.
+Built and unchanged by this reduction: typed outputs with both forms and the load-time
+reference check · inputs resolved by kind · `expect:` · the identity key · the
+append-only journal · `--redo` · fail-closed gates with quorum and bounded repair ·
+committing the panel-approved attempt by index · per-step scratch dirs · tree
+capture/materialize · process-group timeouts · deterministic sorted folding · stable
+prefixes.
 
-Fixed while writing this spec, both found by specifying rather than by a bug report:
-the input fold used a Go map range, so any step with 2+ scalar inputs produced
-different prompt bytes every run and could never hit a cache; and `git add -A`
-silently drops a `.gitignore`'d declared artifact, which `expect:` closes with
-`git add -f --`.
+To reach this spec: `steps:` as a map keyed by id · `agent: <backend>/<model>` · drop
+`version:` and the `steps.` prefix · `output:` → `outputs:` · hardcode `attempts:` · cut
+`needs:` · `aw show` replacing `--dry-run` and `--into` · the exit-code table.
