@@ -25,6 +25,7 @@ type stepKey struct {
 	Model   string            `json:"model"`
 	Prompt  string            `json:"prompt"`
 	Output  map[string]Type   `json:"output"`           // RESOLVED: the defaulted map
+	Expect  []string          `json:"expect,omitempty"` // sorted: order is cosmetic
 	Inputs  map[string]string `json:"inputs,omitempty"` // name -> resolved ref URI or scalar
 	Gate    *gateKey          `json:"gate,omitempty"`
 }
@@ -39,7 +40,8 @@ type gateKey struct {
 // answer. Two runs that would ask a byte-identical question of a byte-identical
 // agent about byte-identical inputs share a key.
 //
-// resolved maps each input name to the upstream's resolved ref URI, or to the
+// id is passed in because a Step is keyed by it in the Plan rather than carrying
+// it. resolved maps each input name to the upstream's resolved ref URI, or to the
 // resolved scalar VALUE. Using the value (not the upstream's key) buys early
 // cutoff: if a re-run produces identical bytes, descendants are correctly skipped.
 //
@@ -49,12 +51,13 @@ type gateKey struct {
 // make every run a miss; anything global would make every edit a global miss.
 // Gate `attempts` is out too — a result accepted under 3 attempts is equally
 // accepted under 5, which is the definition of policy rather than identity.
-func (s Step) Key(a Agent, resolved map[string]string) (string, error) {
+func (s Step) Key(id string, a Agent, resolved map[string]string) (string, error) {
 	k := stepKey{
-		V: keyVersion, ID: s.ID,
+		V: keyVersion, ID: id,
 		Backend: a.Backend, Model: a.Model,
 		Prompt: s.Prompt,
 		Output: s.Fields(),
+		Expect: slices.Sorted(slices.Values(s.Expect)),
 		Inputs: resolved,
 	}
 	if g := s.Gate; g != nil {

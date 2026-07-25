@@ -17,7 +17,7 @@ and everything else is plain code whose dependency arrows all point at `aw`.
 | `gate/` | judge / jury / k-of-N quorum / repair loop — a library, not an engine | `aw` |
 | `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures + materializes a tree | `aw`, `store` |
 | `plan/` | strict static-DAG runner: typed output, no control flow, identity-keyed reuse | `aw`, `store`, `gate`, `yaml.v3` |
-| `cmd/aw/` | `aw run` (pipeline) and `aw demo` (gate) | all |
+| `cmd/aw/` | `aw run` and `aw show` | all |
 | `cmd/aw-fix/` | kind-2 demo: claude edits a throwaway repo, jury judges the diff | claude, gate, store |
 | `cmd/aw-chain/` | workspace forward: fix a repo, feed the result to a second agent | claude, store |
 
@@ -35,12 +35,12 @@ Uses your local Claude Code login (no API key):
 
 ```sh
 go test ./...                                  # deterministic; no network
-go run ./cmd/aw demo                            # generate -> 3-model jury -> repair
-go run ./cmd/aw demo "One sentence. Two sentence. Three. Four."   # watch the jury reject
-go run ./cmd/aw run examples/gated.yaml          # a gated step: draft -> 3-model panel -> repair
-go run ./cmd/aw run examples/pipeline.yaml           # commits to .aw/
-go run ./cmd/aw run examples/pipeline.yaml           # again: zero paid work
-go run ./cmd/aw run examples/pipeline.yaml --redo draft   # force one step
+go run ./cmd/aw show examples/pipeline.yaml      # what is stale, and the call count
+go run ./cmd/aw run  examples/pipeline.yaml      # run; commits to .aw/
+go run ./cmd/aw run  examples/pipeline.yaml      # again: zero paid work
+go run ./cmd/aw run  examples/pipeline.yaml --redo draft
+go run ./cmd/aw show examples/pipeline.yaml tighten.sentence
+go run ./cmd/aw run  examples/gated.yaml         # a gated step: draft -> 3-model panel -> repair
 go run ./cmd/aw-fix                             # claude fixes a bug; jury judges the diff
 go run ./cmd/aw-chain                           # fix a repo, feed repo@v2 to a second agent
 ```
@@ -58,16 +58,20 @@ downstream runs on work it refused.
 
 ```yaml
 steps:
-  - id: release_note
-    agent: writer
+  release_note:
+    agent: claude/sonnet
     prompt: Write a three-sentence release note for the new --json flag.
-    output: { text: string }
+    outputs: { text: string }
     gate:
-      judges: [haiku, sonnet, opus]   # different models, independent votes
-      quorum: 2                        # default: majority, ties reject
-      attempts: 3                      # bounded repair on rejection
+      judges: [claude/haiku, claude/sonnet, claude/opus]  # independent votes
+      quorum: 2                     # optional; omitted = majority, ties reject
       criteria: Approve ONLY if it is exactly three sentences.
 ```
+
+`gate:` is also what lets the language refuse `if:`, `loop:` and reduce entirely —
+a quorum needs counting, repair needs iteration, and halting needs a conditional.
+Packaging the one legitimate use of all three as data means none of them exists as
+syntax.
 
 `output:` is a field map with two type forms: `string`, or a sequence which IS an
 enum. It compiles to strict JSON Schema — `additionalProperties: false` and every
@@ -81,22 +85,19 @@ rendered into the prompt. Both are committed, so a later run can still hand a
 workspace to the next step.
 
 ```yaml
-version: 1
-agents:
-  writer: { backend: claude, model: sonnet }
 steps:
-  - id: draft
-    agent: writer
+  draft:
+    agent: claude/sonnet          # <backend>/<model>; no agents: block
     prompt: Write one sentence about content-addressed storage.
-    output:
+    outputs:
       sentence: string
-      tone: [plain, vivid]     # a sequence IS an enum
-  - id: tighten
-    agent: writer
+      tone: [plain, vivid]        # a sequence IS an enum
+  tighten:
+    agent: claude/opus
     prompt: Tighten the provided sentence. Return only the rewrite.
     inputs:
-      draft: steps.draft.sentence   # checked at LOAD time against draft's output
-    output: { sentence: string }
+      draft: draft.sentence       # checked at LOAD time against draft's outputs
+    outputs: { sentence: string }
 ```
 
 ## State transfer
@@ -132,7 +133,8 @@ its own process group and cancellation signals the group.
 
 ## Not here yet
 
-`expect:` (declared artifact postconditions), `--in DIR` for a host tree, `--dry-run`,
-`aw show`, and more backends (codex, an HTTP LLM). Each slots behind an existing
-seam without touching the core. See [SPEC.md](SPEC.md) for the full language and
-what is deliberately refused.
+More backends (codex, an HTTP LLM), and concurrency beyond the jury. Each slots
+behind an existing seam without touching the core.
+
+The language is specified in [SPEC.md](SPEC.md) — 10 keys, 2 commands, 3 flags —
+and the more useful half of that document is what it deliberately refuses, and why.

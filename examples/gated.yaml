@@ -1,29 +1,22 @@
-# A gated step: one agent drafts, an independent panel of three different models
-# votes, and the step only commits if the panel agrees. On a rejection the
-# critique is fed back and the draft is regenerated, up to `attempts` times.
+# A gated step: one model drafts, an independent panel of three votes, and the
+# step only commits if the panel agrees. On a rejection the critique is fed back
+# and the draft regenerated, up to a fixed bound.
 #
-# `gate:` is data, not control flow. There is no branch here and no loop
-# variable; the loop lives in the runtime and this configures it, the same way
-# `retries: 3` configures a CI job.
+# `gate:` is data, not control flow — no branch, no loop variable. It is also what
+# lets the language refuse if/loop/reduce entirely: a quorum needs counting,
+# repair needs iteration, halting needs a conditional.
 #
-#   go run ./cmd/aw run examples/gated.yaml
-version: 1
-
-agents:
-  writer: { backend: claude, model: sonnet }
-  haiku: { backend: claude, model: haiku }
-  sonnet: { backend: claude, model: sonnet }
-  opus: { backend: claude, model: opus }
+#   aw run examples/gated.yaml
 
 steps:
-  - id: release_note
-    agent: writer
+  release_note:
+    agent: claude/sonnet
     prompt: Write a three-sentence release note for a new `aw run --json` flag that streams machine-readable events.
-    output: { text: string }
+    outputs:
+      text: string
     gate:
-      judges: [haiku, sonnet, opus]
-      quorum: 2
-      attempts: 3
+      judges: [claude/haiku, claude/sonnet, claude/opus]
+      quorum: 2 # omit for a majority; ties reject
       criteria: >
         You are a strict, independent reviewer. Approve ONLY if the release note
         is EXACTLY three sentences AND explicitly names the `aw run --json`

@@ -51,6 +51,7 @@ type Runner struct {
 	Blobs   store.Blobs
 	Journal *Journal        // optional; nil means never reuse and never record
 	Redo    map[string]bool // step ids to re-run even on a hit, this run only
+	Root    *aw.Ref         // optional: the tree bound by --in, referenced as in.workspace
 	Backend func(Agent) (aw.Backend, error)
 	Log     func(format string, args ...any)
 }
@@ -65,35 +66,45 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 	if err != nil {
 		return nil, err
 	}
-	idx := make(map[string]Step, len(p.Steps))
-	for _, s := range p.Steps {
-		idx[s.ID] = s
-	}
-	// Preflight: a step cannot assert paths against a backend that captures no
-	// tree. Checked for EVERY step before any of them runs, so an author mistake
+	// Preflight, over EVERY step before any of them runs, so an author mistake
 	// costs nothing rather than surfacing halfway through a paid pipeline.
-	for _, s := range p.Steps {
+	for _, id := range p.IDs() {
+		s := p.Steps[id]
+		for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
+			if did, _, _ := ParseRef(s.Inputs[name]); did == RootStep && r.Root == nil {
+				return nil, fmt.Errorf("step %q input %q references %s.workspace but no --in was given",
+					id, name, RootStep)
+			}
+		}
 		if len(s.Expect) == 0 {
 			continue
 		}
-		b, err := r.Backend(p.Agents[s.Agent])
+		b, err := r.backendFor(s)
 		if err != nil {
-			return nil, fmt.Errorf("step %q: %w", s.ID, err)
+			return nil, fmt.Errorf("step %q: %w", id, err)
 		}
 		if _, ok := b.(aw.TreeCapturer); !ok {
-			return nil, fmt.Errorf("step %q declares expect: but agent %q (%s) captures no tree",
-				s.ID, s.Agent, b.Name())
+			return nil, fmt.Errorf("step %q declares expect: but agent %q captures no tree", id, s.Agent)
 		}
 	}
+
 	done := map[string]StepResult{}
+	if r.Root != nil {
+		// The reserved root step: a value in the graph, not a special case in bind.
+		done[RootStep] = StepResult{Produced: map[string]aw.Ref{"workspace": *r.Root}}
+	}
 
 	for _, id := range order {
-		s := idx[id]
+		s := p.Steps[id]
 		bound, err := r.bind(s, done)
 		if err != nil {
 			return done, fmt.Errorf("step %q: %w", id, err)
 		}
-		key, err := s.Key(p.Agents[s.Agent], bound.key)
+		agent, err := ParseAgent(s.Agent)
+		if err != nil {
+			return done, fmt.Errorf("step %q: %w", id, err)
+		}
+		key, err := s.Key(id, agent, bound.key)
 		if err != nil {
 			return done, fmt.Errorf("step %q: %w", id, err)
 		}
@@ -111,7 +122,7 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 			}
 		}
 
-		res, err := r.execute(ctx, p, s, bound)
+		res, err := r.execute(ctx, id, s, bound)
 		if err != nil {
 			var rej *RejectedError
 			if r.Journal != nil && errors.As(err, &rej) {
@@ -132,9 +143,8 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 			return done, err
 		}
 		if r.Journal != nil {
-			ag := p.Agents[s.Agent]
 			if err := r.Journal.Append(Entry{
-				Key: key, Ref: ref, Step: id, Agent: ag.Backend + ":" + ag.Model,
+				Key: key, Ref: ref, Step: id, Agent: agent.String(),
 				Tokens: &Tokens{In: res.Tokens.Input, Out: res.Tokens.Output,
 					CacheRead: res.Tokens.CacheRead, CacheCreate: res.Tokens.CacheCreate},
 			}); err != nil {
@@ -167,7 +177,7 @@ type bound struct {
 func (r *Runner) bind(s Step, done map[string]StepResult) (bound, error) {
 	b := bound{prompt: s.Prompt, refs: map[string]aw.Ref{}, key: map[string]string{}}
 	for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
-		did, field, _ := parseFrom(s.Inputs[name])
+		did, field, _ := ParseRef(s.Inputs[name])
 		up := done[did]
 		if ref, ok := up.Produced[field]; ok {
 			b.refs[name] = ref
@@ -184,8 +194,17 @@ func (r *Runner) bind(s Step, done map[string]StepResult) (bound, error) {
 	return b, nil
 }
 
-func (r *Runner) execute(ctx context.Context, p *Plan, s Step, b bound) (StepResult, error) {
-	backend, err := r.Backend(p.Agents[s.Agent])
+// backendFor constructs the backend named by a step's agent string.
+func (r *Runner) backendFor(s Step) (aw.Backend, error) {
+	a, err := ParseAgent(s.Agent)
+	if err != nil {
+		return nil, err
+	}
+	return r.Backend(a)
+}
+
+func (r *Runner) execute(ctx context.Context, id string, s Step, b bound) (StepResult, error) {
+	backend, err := r.backendFor(s)
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -195,13 +214,13 @@ func (r *Runner) execute(ctx context.Context, p *Plan, s Step, b bound) (StepRes
 
 	var res aw.Result
 	if s.Gate == nil {
-		r.logf("run  %s (%s)", s.ID, backend.Name())
+		r.logf("run  %s (%s)", id, backend.Name())
 		res, err = backend.Invoke(ctx, inv)
 		if err == nil {
 			err = s.Validate(res.Output)
 		}
 	} else {
-		res, err = r.runGated(ctx, p, s, backend, inv)
+		res, err = r.runGated(ctx, id, s, backend, inv)
 	}
 	if err != nil {
 		return StepResult{}, err
@@ -212,23 +231,23 @@ func (r *Runner) execute(ctx context.Context, p *Plan, s Step, b bound) (StepRes
 // runGated generates, submits the result to an independent panel, and repairs
 // from the critique until quorum or the attempt bound. A gate that never reaches
 // quorum fails the step rather than passing the work through.
-func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backend, inv aw.Invocation) (aw.Result, error) {
+func (r *Runner) runGated(ctx context.Context, id string, s Step, backend aw.Backend, inv aw.Invocation) (aw.Result, error) {
 	g := s.Gate
 	judges := make([]aw.Backend, 0, len(g.Judges))
-	for _, name := range g.Judges {
-		b, err := r.Backend(p.Agents[name])
+	for _, spec := range g.Judges {
+		a, err := ParseAgent(spec)
+		if err != nil {
+			return aw.Result{}, err
+		}
+		b, err := r.Backend(a)
 		if err != nil {
 			return aw.Result{}, err
 		}
 		judges = append(judges, b)
 	}
 	quorum := g.Threshold()
-	attempts := g.Attempts
-	if attempts == 0 {
-		attempts = 3
-	}
 	r.logf("run  %s (%s) + gate: %d judges, quorum %d, up to %d attempts",
-		s.ID, backend.Name(), len(judges), quorum, attempts)
+		id, backend.Name(), len(judges), quorum, Attempts)
 
 	// One entry per generated attempt, so the committed record can be selected by
 	// the gate's OWN attempt index. Keeping a single `accepted` variable that each
@@ -264,12 +283,12 @@ func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backe
 		return gate.Candidate{Text: string(text), Produced: res.Produced}, nil
 	}
 
-	out, err := gate.Gate(ctx, gen, judges, g.Criteria, quorum, attempts)
+	out, err := gate.Gate(ctx, gen, judges, g.Criteria, quorum, Attempts)
 	if err != nil {
 		return aw.Result{}, err
 	}
 	if !out.Approved {
-		return aw.Result{}, &RejectedError{Step: s.ID, Attempts: out.Attempts, Objections: objections(out.Votes)}
+		return aw.Result{}, &RejectedError{Step: id, Attempts: out.Attempts, Objections: objections(out.Votes)}
 	}
 	// Commit the attempt the panel APPROVED, addressed by index — never merely the
 	// last one generated.
@@ -325,4 +344,100 @@ func short(ref string) string {
 		return ref[:18]
 	}
 	return ref
+}
+
+// StepStatus is one row of `aw show PLAN`: what a step would do on the next run.
+type StepStatus struct {
+	ID    string
+	State string // fresh | stale | unknown
+	Ref   string // set when fresh
+	Calls int    // worst-case invocations if it runs
+}
+
+// Status resolves what the next run would do, WITHOUT executing anything. It is
+// the same identity-resolution walk Run performs, which is the point: `aw run` is
+// `aw show` plus executing the stale frontier, so there is one implementation of
+// "is this step fresh" rather than a second one inside a --dry-run branch.
+//
+// Honest limit: a step's key depends on its upstream's RESOLVED output, so
+// everything past the first stale step is `unknown` rather than `stale`. That is
+// the price of early cutoff (an upstream that re-runs to identical bytes correctly
+// skips its descendants) and Nix has the same limitation with floating outputs.
+func (r *Runner) Status(p *Plan) ([]StepStatus, error) {
+	order, err := p.order()
+	if err != nil {
+		return nil, err
+	}
+	done := map[string]StepResult{}
+	if r.Root != nil {
+		done[RootStep] = StepResult{Produced: map[string]aw.Ref{"workspace": *r.Root}}
+	}
+	out := make([]StepStatus, 0, len(order))
+	for _, id := range order {
+		s := p.Steps[id]
+		st := StepStatus{ID: id, State: "unknown", Calls: worstCase(s)}
+
+		bound, err := r.bind(s, done)
+		if err != nil {
+			out = append(out, st) // an upstream is unknown, so this one is too
+			continue
+		}
+		agent, err := ParseAgent(s.Agent)
+		if err != nil {
+			return nil, fmt.Errorf("step %q: %w", id, err)
+		}
+		key, err := s.Key(id, agent, bound.key)
+		if err != nil {
+			return nil, fmt.Errorf("step %q: %w", id, err)
+		}
+		st.State = "stale"
+		if r.Journal != nil && !r.Redo[id] {
+			if ref, ok := r.Journal.Lookup(key); ok {
+				rec, err := load(r.Blobs, ref)
+				if err != nil {
+					return nil, fmt.Errorf("step %q: %w", id, err)
+				}
+				rec.Ref = ref
+				done[id] = rec
+				st.State, st.Ref, st.Calls = "fresh", ref, 0
+			}
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+// worstCase is the invocation count if a step runs and its panel refuses every
+// time: one generation plus the whole panel, per attempt. Exact in CALLS; the
+// dollar cost is a range, because nobody knows output tokens before running.
+func worstCase(s Step) int {
+	if s.Gate == nil {
+		return 1
+	}
+	return Attempts * (1 + len(s.Gate.Judges))
+}
+
+// Committed returns a step's committed record, or false if the next run would
+// re-execute it. Used by `aw show PLAN REF` so reading a result and previewing a
+// run share one notion of what "already done" means.
+func (r *Runner) Committed(p *Plan, id string) (StepResult, bool, error) {
+	status, err := r.Status(p)
+	if err != nil {
+		return StepResult{}, false, err
+	}
+	for _, st := range status {
+		if st.ID != id {
+			continue
+		}
+		if st.State != "fresh" {
+			return StepResult{}, false, nil
+		}
+		rec, err := load(r.Blobs, st.Ref)
+		if err != nil {
+			return StepResult{}, false, err
+		}
+		rec.Ref = st.Ref
+		return rec, true, nil
+	}
+	return StepResult{}, false, fmt.Errorf("no step %q", id)
 }

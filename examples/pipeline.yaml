@@ -1,26 +1,22 @@
-# A static two-step pipeline: one agent drafts, another tightens. Steps are wired
-# by TYPED references (inputs.*.from), never string templating, and there is no
-# control flow — that lives in code around aw, not in this file.
-version: 1
-
-agents:
-  writer:
-    backend: claude
-    model: sonnet
-  editor:
-    backend: claude
-    model: opus
+# Two steps wired by a TYPED reference. `draft.sentence` is checked when the plan
+# loads, against draft's declared outputs — a typo fails before a token is spent.
+#
+#   aw run examples/pipeline.yaml       # commits to .aw/
+#   aw run examples/pipeline.yaml       # again: zero paid work
+#   aw show examples/pipeline.yaml      # what is stale, and the call count
 
 steps:
-  - id: draft
-    agent: writer
+  draft:
+    agent: claude/sonnet
     prompt: Write one vivid sentence about content-addressed storage.
-    output: { sentence: string }
+    outputs:
+      sentence: string
+      tone: [plain, vivid] # a sequence IS an enum
 
-  - id: tighten
-    agent: editor
-    needs: [draft]
-    prompt: Rewrite the provided sentence to be tighter and more concrete. Return only the rewrite.
+  tighten:
+    agent: claude/opus
+    prompt: Tighten the provided sentence. Return only the rewrite.
     inputs:
-      draft: steps.draft.sentence
-    output: { sentence: string }
+      draft: draft.sentence
+    outputs:
+      sentence: string

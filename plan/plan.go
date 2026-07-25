@@ -1,15 +1,17 @@
-// Package plan is aw's static-DAG runner: a strict, control-flow-free
-// description of agent steps wired by typed references, executed in dependency
-// order. There is deliberately no templating and no if/loop/map — a step names
-// its inputs, the runner materializes them, and any unknown key is a parse
-// error. Orchestration that needs branches, loops, or retries belongs in code
-// around aw, not in this format.
+// Package plan is aw's static-DAG runner: a strict, control-flow-free description
+// of agent steps wired by typed references, executed in dependency order. There is
+// deliberately no templating and no if/loop/map — a step names its inputs, the
+// runner materializes them, and any unknown key is a parse error. Orchestration
+// that needs branches, loops or retries belongs in code around aw, not here.
+//
+// See SPEC.md for the language and, more usefully, for what it refuses.
 package plan
 
 import (
 	"fmt"
 	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -17,42 +19,55 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Plan is a parsed pipeline: named agents and a list of steps.
+// Plan is a parsed pipeline. `steps` is the only top-level key: with `version:`
+// cut, it is also the file's one self-identifying token, so a typo at the top
+// level reports as an unknown key rather than as a malformed step.
 type Plan struct {
-	Version int              `yaml:"version"`
-	Agents  map[string]Agent `yaml:"agents"`
-	Steps   []Step           `yaml:"steps"`
+	Steps map[string]Step `yaml:"steps"`
 }
 
-// Agent is a reusable backend spec a step refers to by name.
-type Agent struct {
-	Backend string `yaml:"backend"` // e.g. "claude"
-	Model   string `yaml:"model"`
-}
-
-// Step is one invocation. Its dependencies come from Needs and from the steps
-// its Inputs reference; both must be declared earlier in the plan.
+// Step is one invocation, keyed by its id in the Plan. Dependencies come from the
+// references in Inputs — there is no `needs:`, because an edge carrying no data
+// cannot enter the identity key, and an ordering constraint outside the key is one
+// that silently stops applying the moment the step becomes a cache hit.
 type Step struct {
-	ID     string            `yaml:"id"`
-	Agent  string            `yaml:"agent"`
-	Prompt string            `yaml:"prompt"`
-	Needs  []string          `yaml:"needs,omitempty"`
-	Inputs map[string]string `yaml:"inputs,omitempty"` // name -> "steps.<id>.<field>"
-	Output map[string]Type   `yaml:"output,omitempty"` // field -> type; omitted => {text: string}
-	Expect []string          `yaml:"expect,omitempty"` // paths that MUST exist in the captured tree
-	Gate   *Gate             `yaml:"gate,omitempty"`   // optional acceptance check
+	Agent   string            `yaml:"agent"`             // "<backend>/<model>"
+	Prompt  string            `yaml:"prompt"`            //
+	Inputs  map[string]string `yaml:"inputs,omitempty"`  // name -> "<step>.<field>"
+	Outputs map[string]Type   `yaml:"outputs,omitempty"` // field -> type; omitted => {text: string}
+	Expect  []string          `yaml:"expect,omitempty"`  // paths that must exist in the captured tree
+	Gate    *Gate             `yaml:"gate,omitempty"`    // optional acceptance panel
 }
 
-// Type is a declared output field's type. There are exactly two forms:
+// Agent is a backend and a model, written as ONE string (`claude/sonnet`) because
+// a name pointing at a 2-tuple is indirection carrying no information. Both halves
+// are mandatory: an omitted model would let the CLI resolve from ambient account
+// state, which is a variable the identity key cannot see.
+type Agent struct {
+	Backend string
+	Model   string
+}
+
+// ParseAgent splits on the FIRST slash, so a model id containing slashes
+// (openrouter/anthropic/claude-opus) survives intact.
+func ParseAgent(s string) (Agent, error) {
+	b, m, ok := strings.Cut(s, "/")
+	if !ok || b == "" || m == "" {
+		return Agent{}, fmt.Errorf("agent %q must be <backend>/<model>", s)
+	}
+	return Agent{Backend: b, Model: m}, nil
+}
+
+func (a Agent) String() string { return a.Backend + "/" + a.Model }
+
+// Type is a declared output field's type. Exactly two forms:
 //
 //	summary: string              // the keyword
 //	urgency: [low, medium, high] // a sequence IS an enum of its members
 //
-// No numbers, booleans, arrays or nested records. Two reasons: the reference
-// grammar stops at steps.<id>.<field>, so declaring depth buys nothing that can
-// be checked statically; and value constraints are the gate's job, since aw does
-// no arithmetic and renders every value to text anyway. Keeping it to two forms
-// also means no coercion question ever arises ("7" is not 7, 1 is not true).
+// No numbers, booleans, arrays or nested records: the reference grammar stops at
+// <step>.<field>, so declaring depth buys nothing checkable, and value constraints
+// are the gate's job. Two forms also means the coercion question never arises.
 type Type struct {
 	Enum []string // nil => plain string
 }
@@ -84,42 +99,25 @@ func (t *Type) UnmarshalYAML(n *yaml.Node) error {
 	}
 }
 
-// Fields returns the step's declared output fields, defaulting to {text: string}
-// when the author declared none. Resolving the default here (rather than at use)
-// is what lets a reference to `steps.x.text` check out on an undeclared step.
-func (s Step) Fields() map[string]Type {
-	if len(s.Output) == 0 {
-		return map[string]Type{"text": {}}
-	}
-	return s.Output
-}
-
-// reserved names a workspace step produces automatically. They may be
-// REFERENCED but never DECLARED, so an author cannot shadow them.
-var reserved = map[string]string{
-	"workspace": "the captured tree",
-	"diff":      "the rendering of what changed",
-}
-
-// Gate configures an independent acceptance check on a step. It is DATA, not
-// control flow: the author writes no branch, no condition and no loop variable.
-// The loop lives inside the gate library and this only configures it, the same
-// way `retries: 3` configures a CI runner. That is why it does not violate the
-// format's no-control-flow rule.
+// Gate is an independent acceptance panel. It is DATA, not control flow: the
+// author writes no branch, no condition and no loop variable. The loop lives in
+// the gate library and this only configures it, the way `retries: 3` configures CI.
 //
-// A step whose gate does not reach quorum within Attempts FAILS. In an
-// unattended run that is the point: nothing downstream should proceed on work
-// the panel refused.
+// It is also what lets the language refuse if/loop/reduce entirely — a quorum needs
+// counting, repair needs iteration, and halting needs a conditional. Packaging the
+// one legitimate use of all three as data means none of them exists as syntax.
+//
+// A step whose panel never reaches quorum FAILS. In an unattended run that is the
+// point: nothing downstream should proceed on work the panel refused.
 type Gate struct {
-	Judges   []string `yaml:"judges"`             // agent names that vote
-	Criteria string   `yaml:"criteria"`           // what the judges must check
-	Quorum   *int     `yaml:"quorum,omitempty"`   // approvals needed; nil => majority
-	Attempts int      `yaml:"attempts,omitempty"` // bounded repair attempts; default 3
+	Judges   []string `yaml:"judges"`           // "<backend>/<model>" each
+	Criteria string   `yaml:"criteria"`         // the standard, not a task
+	Quorum   *int     `yaml:"quorum,omitempty"` // nil => majority; explicit must be 1..N
 }
 
-// Threshold resolves the panel's approval bar: the declared quorum, or a majority
-// of the judges. Both the runner and the identity key call THIS — never their own
-// copy — so the number hashed can never drift from the number enforced.
+// Threshold resolves the panel's approval bar. Both the runner and the identity
+// key call THIS — never their own copy — so the number hashed can never drift from
+// the number enforced.
 func (g Gate) Threshold() int {
 	if g.Quorum != nil {
 		return *g.Quorum
@@ -127,9 +125,31 @@ func (g Gate) Threshold() int {
 	return gate.Majority(len(g.Judges))
 }
 
-// Load reads a plan from a YAML (or JSON) file with strict decoding: unknown
-// keys are errors, so a control-flow keyword like `loop:` or `if:` fails loudly
-// instead of being silently ignored.
+// Attempts is the repair bound. Fixed, not a key: a bounded loop is the
+// requirement, a tunable one is not, and a result accepted under 3 attempts is
+// equally accepted under 5 — which is why it is excluded from the identity key.
+const Attempts = 3
+
+// RootStep is the reserved step id bound by `--in DIR`. It produces `workspace`
+// and nothing else, which keeps a machine-specific path out of the file whose
+// bytes are the plan's identity.
+const RootStep = "in"
+
+// reserved names a tree-capturing step produces automatically. Referenceable,
+// never declarable, so an author cannot shadow them.
+var reserved = map[string]string{
+	"workspace": "the captured tree",
+	"diff":      "the rendering of what changed",
+}
+
+// stepID constrains ids so a reference can never be ambiguous: no dot means
+// <step>.<field> always splits in exactly one place.
+var stepID = regexp.MustCompile(`^[a-z0-9_-]+$`)
+
+// Load reads a plan with strict decoding: unknown keys are errors, so a
+// control-flow keyword like `loop:` fails loudly instead of being ignored.
+// Duplicate step ids come free from the map form — yaml.v3 reports them with the
+// line of the earlier definition.
 func Load(path string) (*Plan, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -148,71 +168,77 @@ func Load(path string) (*Plan, error) {
 	return &p, nil
 }
 
-func (p *Plan) validate() error {
-	if p.Version != 1 {
-		return fmt.Errorf("version must be 1, got %d", p.Version)
+// Fields returns the step's declared output fields, defaulting to {text: string}.
+// Resolving the default HERE is what lets a reference to an undeclared step's
+// `.text` still check out at load time.
+func (s Step) Fields() map[string]Type {
+	if len(s.Outputs) == 0 {
+		return map[string]Type{"text": {}}
 	}
-	seen := map[string]bool{}
-	for i, s := range p.Steps {
+	return s.Outputs
+}
+
+// IDs returns the plan's step ids, sorted — the stable order everything else
+// iterates in, so a map's randomization never reaches execution or a hash.
+func (p *Plan) IDs() []string { return slices.Sorted(maps.Keys(p.Steps)) }
+
+func (p *Plan) validate() error {
+	if len(p.Steps) == 0 {
+		return fmt.Errorf("no steps")
+	}
+	for _, id := range p.IDs() {
+		s := p.Steps[id]
 		switch {
-		case s.ID == "":
-			return fmt.Errorf("step %d: missing id", i)
-		case seen[s.ID]:
-			return fmt.Errorf("duplicate step id %q", s.ID)
+		case id == RootStep:
+			return fmt.Errorf("step id %q is reserved for --in", RootStep)
+		case !stepID.MatchString(id):
+			return fmt.Errorf("step %q: id must match %s", id, stepID)
 		case s.Prompt == "":
-			return fmt.Errorf("step %q: missing prompt", s.ID)
+			return fmt.Errorf("step %q: missing prompt", id)
 		}
-		if _, ok := p.Agents[s.Agent]; !ok {
-			return fmt.Errorf("step %q: unknown agent %q", s.ID, s.Agent)
+		if _, err := ParseAgent(s.Agent); err != nil {
+			return fmt.Errorf("step %q: %w", id, err)
 		}
-		for field := range s.Output {
+		for field := range s.Outputs {
 			if why, bad := reserved[field]; bad {
-				return fmt.Errorf("step %q: %q is reserved (%s) and cannot be declared", s.ID, field, why)
+				return fmt.Errorf("step %q: %q is reserved (%s) and cannot be declared", id, field, why)
 			}
 		}
 		if g := s.Gate; g != nil {
 			switch {
 			case len(g.Judges) == 0:
-				return fmt.Errorf("step %q: gate needs at least one judge", s.ID)
+				return fmt.Errorf("step %q: gate needs at least one judge", id)
 			case g.Criteria == "":
-				return fmt.Errorf("step %q: gate needs criteria", s.ID)
+				return fmt.Errorf("step %q: gate needs criteria", id)
 			case g.Quorum != nil && (*g.Quorum < 1 || *g.Quorum > len(g.Judges)):
-				// A POINTER, so an omitted quorum is distinguishable from an explicit
-				// one. With a plain int, `quorum: 0` was indistinguishable from absent
-				// and silently became a majority — a value meaning something other
-				// than what it says. It failed safe, which is how it survived.
 				return fmt.Errorf("step %q: gate quorum %d out of range; must be 1..%d, or omitted for a majority",
-					s.ID, *g.Quorum, len(g.Judges))
-			case g.Attempts < 0:
-				return fmt.Errorf("step %q: gate attempts must not be negative", s.ID)
+					id, *g.Quorum, len(g.Judges))
 			}
 			for _, j := range g.Judges {
-				if _, ok := p.Agents[j]; !ok {
-					return fmt.Errorf("step %q: gate names unknown judge agent %q", s.ID, j)
+				if _, err := ParseAgent(j); err != nil {
+					return fmt.Errorf("step %q: gate judge: %w", id, err)
 				}
 			}
 		}
-		seen[s.ID] = true
 	}
-	byID := make(map[string]Step, len(p.Steps))
-	for _, s := range p.Steps {
-		byID[s.ID] = s
-	}
-	for _, s := range p.Steps {
-		for _, n := range s.Needs {
-			if !seen[n] {
-				return fmt.Errorf("step %q needs unknown step %q", s.ID, n)
-			}
-		}
-		for name, src := range s.Inputs {
-			id, field, err := parseFrom(src)
+
+	for _, id := range p.IDs() {
+		s := p.Steps[id]
+		for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
+			did, field, err := ParseRef(s.Inputs[name])
 			if err != nil {
-				return fmt.Errorf("step %q input %q: %w", s.ID, name, err)
+				return fmt.Errorf("step %q input %q: %w", id, name, err)
 			}
-			up, ok := byID[id]
+			if did == RootStep {
+				if field != "workspace" {
+					return fmt.Errorf("step %q input %q: %s produces only `workspace`", id, name, RootStep)
+				}
+				continue
+			}
+			up, ok := p.Steps[did]
 			if !ok {
-				return fmt.Errorf("step %q input %q references unknown step %q; known steps: %s",
-					s.ID, name, id, strings.Join(stepIDs(p.Steps), ", "))
+				return fmt.Errorf("step %q input %q references unknown step %q; known: %s",
+					id, name, did, strings.Join(p.IDs(), ", "))
 			}
 			// THE load-time guarantee: the referenced field must be declared
 			// upstream. Because conformance is checked at runtime and there are no
@@ -222,34 +248,30 @@ func (p *Plan) validate() error {
 				continue
 			}
 			if _, ok := reserved[field]; ok {
-				continue // auto-produced by a workspace step
+				continue // auto-produced by a tree-capturing step
 			}
 			return fmt.Errorf("step %q input %q: step %q has no output field %q; it declares: %s",
-				s.ID, name, id, field, strings.Join(fieldNames(up), ", "))
+				id, name, did, field, strings.Join(fieldNames(up), ", "))
 		}
 	}
-	if _, err := p.order(); err != nil {
-		return err
-	}
-	return nil
+	_, err := p.order()
+	return err
 }
 
-// parseFrom splits "steps.<id>.<field>".
-func parseFrom(from string) (id, field string, err error) {
-	parts := strings.Split(from, ".")
-	if len(parts) != 3 || parts[0] != "steps" {
-		return "", "", fmt.Errorf("from %q must be steps.<id>.<field>", from)
+// ParseRef splits a reference into its two segments. Exactly two: step ids cannot
+// contain a dot, so there is one parse rule and one error message — the same one
+// the loader uses and the CLI uses for a REF argument.
+func ParseRef(s string) (step, field string, err error) {
+	a, b, ok := strings.Cut(s, ".")
+	if !ok || a == "" || b == "" || strings.Contains(b, ".") {
+		return "", "", fmt.Errorf("reference %q must be <step>.<field>", s)
 	}
-	return parts[1], parts[2], nil
+	return a, b, nil
 }
 
-// order returns step ids in dependency (topological) order, treating both Needs
-// and Inputs as edges. It errors on a cycle.
+// order returns step ids in dependency order. Ids are visited sorted so the
+// topological order is stable across runs rather than a map's randomization.
 func (p *Plan) order() ([]string, error) {
-	idx := make(map[string]Step, len(p.Steps))
-	for _, s := range p.Steps {
-		idx[s.ID] = s
-	}
 	const (
 		unseen = iota
 		visiting
@@ -266,15 +288,19 @@ func (p *Plan) order() ([]string, error) {
 			return nil
 		}
 		state[id] = visiting
-		s := idx[id]
-		deps := append([]string(nil), s.Needs...)
-		// sorted, so the topological order itself is stable across runs
+		s := p.Steps[id]
 		for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
-			did, _, _ := parseFrom(s.Inputs[name])
-			deps = append(deps, did)
-		}
-		for _, d := range deps {
-			if err := visit(d); err != nil {
+			did, _, err := ParseRef(s.Inputs[name])
+			if err != nil {
+				return err
+			}
+			if did == RootStep {
+				continue
+			}
+			if _, ok := p.Steps[did]; !ok {
+				continue // validate reports this with a better message
+			}
+			if err := visit(did); err != nil {
 				return err
 			}
 		}
@@ -282,33 +308,22 @@ func (p *Plan) order() ([]string, error) {
 		out = append(out, id)
 		return nil
 	}
-	for _, s := range p.Steps {
-		if err := visit(s.ID); err != nil {
+	for _, id := range p.IDs() {
+		if err := visit(id); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
-// stepIDs lists declared step ids, for error messages that tell the author what
-// they could have meant.
-func stepIDs(steps []Step) []string {
-	out := make([]string, 0, len(steps))
-	for _, s := range steps {
-		out = append(out, s.ID)
-	}
-	return out
-}
-
-// fieldNames lists a step's declared output fields, sorted.
-func fieldNames(s Step) []string {
-	return slices.Sorted(maps.Keys(s.Fields()))
-}
+// fieldNames lists a step's declared output fields, sorted, for error messages
+// that tell an author what they could have meant.
+func fieldNames(s Step) []string { return slices.Sorted(maps.Keys(s.Fields())) }
 
 // Schema compiles a step's declared output into JSON Schema. additionalProperties
 // is always false and every declared field is always required — the author never
-// writes those, which is what makes "no optional fields" unviolatable rather than
-// merely documented.
+// writes those, which makes "no optional fields" unviolatable rather than
+// documented, and that is what makes the load-time check a theorem.
 func (s Step) Schema() map[string]any {
 	fields := s.Fields()
 	props := make(map[string]any, len(fields))
@@ -326,11 +341,10 @@ func (s Step) Schema() map[string]any {
 	}
 }
 
-// Validate checks an agent's actual output against the step's declaration: every
-// declared field present, every value a string, enum values members, and NO
-// undeclared fields. A stray key means the model improvised, and improvisation is
-// the signal that the rest is untrustworthy — so any failure rejects the output
-// whole. No coercion, no defaults, no partial acceptance.
+// Validate checks an agent's actual output against the declaration: every declared
+// field present, every value a string, enum values members, and NO undeclared
+// fields. Any failure rejects the output whole — a stray key means the model
+// improvised, and improvisation is the signal that the rest is untrustworthy.
 func (s Step) Validate(got map[string]any) error {
 	fields := s.Fields()
 	for _, name := range slices.Sorted(maps.Keys(fields)) {
@@ -353,8 +367,7 @@ func (s Step) Validate(got map[string]any) error {
 		if _, ok := reserved[name]; ok {
 			continue // backend-produced, not model-produced
 		}
-		return fmt.Errorf("output has undeclared field %q; declared: %s",
-			name, strings.Join(fieldNames(s), ", "))
+		return fmt.Errorf("output has undeclared field %q; declared: %s", name, strings.Join(fieldNames(s), ", "))
 	}
 	return nil
 }
