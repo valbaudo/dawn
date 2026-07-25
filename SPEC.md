@@ -27,7 +27,7 @@ steps:                        # the only top-level key
     gate:
       judges:   [<backend>/<model>, …]
       criteria: <text>
-      quorum:   <int>                   # default ⌊N/2⌋+1; ties reject
+      quorum:   <int>                   # optional; omitted = ⌊N/2⌋+1, ties reject
 ```
 
 Ten keys: `steps` `agent` `prompt` `inputs` `outputs` `expect` `gate` `judges`
@@ -161,7 +161,7 @@ string).
 
 **Load time**, before a token is spent: the reference is exactly `<step>.<field>`; the
 step exists; the field is declared upstream or reserved; the graph is acyclic; judges
-are well-formed; quorum ∈ 1..N; `expect:` only on a tree-capturing backend.
+are well-formed; an explicit quorum ∈ 1..N; `expect:` only on a tree-capturing backend.
 
 **Runtime**, after the agent returns and *before* the step commits: strict-parse, every
 declared field present, enum values members, **no undeclared fields**. Any failure

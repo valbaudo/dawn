@@ -70,8 +70,8 @@ func TestInvalidationContract(t *testing.T) {
 func TestExplicitDefaultsAreFree(t *testing.T) {
 	implicit := Step{ID: "s", Prompt: "p", Gate: &Gate{Judges: []string{"a", "b"}, Criteria: "c"}}
 	explicit := Step{ID: "s", Prompt: "p",
-		Output: map[string]Type{"text": {}},                                 // the default
-		Gate:   &Gate{Judges: []string{"a", "b"}, Criteria: "c", Quorum: 2}} // Majority(2)
+		Output: map[string]Type{"text": {}},                                    // the default
+		Gate:   &Gate{Judges: []string{"a", "b"}, Criteria: "c", Quorum: q(2)}} // Majority(2)
 	if key(t, implicit, agentX, nil) != key(t, explicit, agentX, nil) {
 		t.Fatal("writing a resolved default must hash identically")
 	}

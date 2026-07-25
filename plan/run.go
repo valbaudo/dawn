@@ -222,10 +222,7 @@ func (r *Runner) runGated(ctx context.Context, p *Plan, s Step, backend aw.Backe
 		}
 		judges = append(judges, b)
 	}
-	quorum := g.Quorum
-	if quorum == 0 {
-		quorum = gate.Majority(len(judges))
-	}
+	quorum := g.Threshold()
 	attempts := g.Attempts
 	if attempts == 0 {
 		attempts = 3

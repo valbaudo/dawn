@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/valbaudo/aw/gate"
 	"gopkg.in/yaml.v3"
 )
 
@@ -112,8 +113,18 @@ var reserved = map[string]string{
 type Gate struct {
 	Judges   []string `yaml:"judges"`             // agent names that vote
 	Criteria string   `yaml:"criteria"`           // what the judges must check
-	Quorum   int      `yaml:"quorum,omitempty"`   // approvals needed; default majority
+	Quorum   *int     `yaml:"quorum,omitempty"`   // approvals needed; nil => majority
 	Attempts int      `yaml:"attempts,omitempty"` // bounded repair attempts; default 3
+}
+
+// Threshold resolves the panel's approval bar: the declared quorum, or a majority
+// of the judges. Both the runner and the identity key call THIS — never their own
+// copy — so the number hashed can never drift from the number enforced.
+func (g Gate) Threshold() int {
+	if g.Quorum != nil {
+		return *g.Quorum
+	}
+	return gate.Majority(len(g.Judges))
 }
 
 // Load reads a plan from a YAML (or JSON) file with strict decoding: unknown
@@ -165,8 +176,13 @@ func (p *Plan) validate() error {
 				return fmt.Errorf("step %q: gate needs at least one judge", s.ID)
 			case g.Criteria == "":
 				return fmt.Errorf("step %q: gate needs criteria", s.ID)
-			case g.Quorum < 0 || g.Quorum > len(g.Judges):
-				return fmt.Errorf("step %q: gate quorum %d out of range for %d judges", s.ID, g.Quorum, len(g.Judges))
+			case g.Quorum != nil && (*g.Quorum < 1 || *g.Quorum > len(g.Judges)):
+				// A POINTER, so an omitted quorum is distinguishable from an explicit
+				// one. With a plain int, `quorum: 0` was indistinguishable from absent
+				// and silently became a majority — a value meaning something other
+				// than what it says. It failed safe, which is how it survived.
+				return fmt.Errorf("step %q: gate quorum %d out of range; must be 1..%d, or omitted for a majority",
+					s.ID, *g.Quorum, len(g.Judges))
 			case g.Attempts < 0:
 				return fmt.Errorf("step %q: gate attempts must not be negative", s.ID)
 			}

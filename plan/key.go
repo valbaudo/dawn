@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-
-	"github.com/valbaudo/aw/gate"
 )
 
 // keyVersion is the key SCHEMA version. Bumping it misses every entry in every
@@ -62,11 +60,9 @@ func (s Step) Key(a Agent, resolved map[string]string) (string, error) {
 	if g := s.Gate; g != nil {
 		judges := slices.Clone(g.Judges)
 		slices.Sort(judges)
-		q := g.Quorum
-		if q == 0 {
-			q = gate.Majority(len(judges)) // the SAME function the runner enforces,
-		} //                                  never a copy that could drift from it
-		k.Gate = &gateKey{Judges: judges, Criteria: g.Criteria, Quorum: q}
+		// Threshold(), not a local copy: the hashed quorum and the enforced quorum
+		// are the same call, so they cannot drift.
+		k.Gate = &gateKey{Judges: judges, Criteria: g.Criteria, Quorum: g.Threshold()}
 	}
 	b, err := json.Marshal(k)
 	if err != nil {

@@ -178,3 +178,40 @@ func TestExpectRequiresATreeCapturingBackend(t *testing.T) {
 		t.Fatalf("the check must happen BEFORE anything runs, but %d invocations were made", calls)
 	}
 }
+
+// An omitted quorum means a majority. An EXPLICIT zero does not — it reads as
+// "nobody needs to approve", so it must be an error rather than silently becoming
+// the majority it did when the field was a plain int.
+func TestQuorumDefaultsButRejectsExplicitZero(t *testing.T) {
+	plan := func(g *Gate) *Plan {
+		return &Plan{Version: 1,
+			Agents: map[string]Agent{"w": {Backend: "x", Model: "m"}},
+			Steps:  []Step{{ID: "s", Agent: "w", Prompt: "p", Gate: g}}}
+	}
+	three := []string{"w", "w", "w"}
+
+	omitted := &Gate{Judges: three, Criteria: "c"}
+	if err := plan(omitted).validate(); err != nil {
+		t.Fatalf("an omitted quorum is legal: %v", err)
+	}
+	if got := omitted.Threshold(); got != 2 {
+		t.Fatalf("omitted quorum over 3 judges = %d, want a majority of 2", got)
+	}
+
+	explicit := &Gate{Judges: three, Criteria: "c", Quorum: q(2)}
+	if explicit.Threshold() != omitted.Threshold() {
+		t.Fatal("writing the default explicitly must resolve identically")
+	}
+
+	for name, g := range map[string]*Gate{
+		"zero":      {Judges: three, Criteria: "c", Quorum: q(0)},
+		"negative":  {Judges: three, Criteria: "c", Quorum: q(-1)},
+		"too large": {Judges: three, Criteria: "c", Quorum: q(4)},
+	} {
+		t.Run("rejects "+name, func(t *testing.T) {
+			if err := plan(g).validate(); err == nil {
+				t.Fatal("expected a load error")
+			}
+		})
+	}
+}

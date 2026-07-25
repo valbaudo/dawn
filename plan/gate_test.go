@@ -66,6 +66,10 @@ type notFound struct{ model string }
 
 func (e *notFound) Error() string { return "no backend for model " + e.model }
 
+// q is a pointer helper: an omitted quorum and an explicit one are different
+// things, which is the whole reason the field is a pointer.
+func q(n int) *int { return &n }
+
 func gatedPlan(g *Gate) *Plan {
 	return &Plan{
 		Version: 1,
@@ -213,7 +217,7 @@ func TestGateValidation(t *testing.T) {
 		"no judges":       {Criteria: "x"},
 		"no criteria":     {Judges: []string{"a"}},
 		"unknown judge":   {Judges: []string{"nope"}, Criteria: "x"},
-		"quorum too high": {Judges: []string{"a"}, Criteria: "x", Quorum: 5},
+		"quorum too high": {Judges: []string{"a"}, Criteria: "x", Quorum: q(5)},
 	}
 	for name, g := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -222,7 +226,7 @@ func TestGateValidation(t *testing.T) {
 			}
 		})
 	}
-	ok := gatedPlan(&Gate{Judges: []string{"a", "b"}, Criteria: "x", Quorum: 2, Attempts: 1})
+	ok := gatedPlan(&Gate{Judges: []string{"a", "b"}, Criteria: "x", Quorum: q(2), Attempts: 1})
 	if err := ok.validate(); err != nil {
 		t.Fatalf("valid gate rejected: %v", err)
 	}
