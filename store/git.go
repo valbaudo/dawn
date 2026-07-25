@@ -137,6 +137,12 @@ func (t *Trees) tempIndex() (path string, done func(), err error) {
 func (t *Trees) env(workTree, index string) []string {
 	env := append(os.Environ(), "GIT_DIR="+t.gitDir)
 	if workTree != "" {
+		// ABSOLUTE. The command also runs with cmd.Dir = workTree, so a relative
+		// GIT_WORK_TREE would be resolved a second time against it —
+		// `--in examples/calc` looked for examples/calc/examples/calc.
+		if abs, err := filepath.Abs(workTree); err == nil {
+			workTree = abs
+		}
 		env = append(env, "GIT_WORK_TREE="+workTree)
 	}
 	if index != "" {

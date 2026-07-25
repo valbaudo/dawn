@@ -1,0 +1,43 @@
+# Two agents editing a real repository, with the tree flowing between them.
+#
+# `fix` works on the directory given by --in, and its change is gated: three
+# different models must agree before it commits. `test` then materializes the
+# tree `fix` PRODUCED — not a shared mutable directory — so it builds on the
+# accepted fix and nothing else.
+#
+#   aw run  examples/repo.yaml --in examples/calc
+#   aw show examples/repo.yaml test.workspace | tar -x -C out/
+#
+# examples/calc is only ever READ. Each step edits a scratch copy, and what
+# survives is a content-addressed tree ref.
+
+steps:
+  fix:
+    agent: claude-ws/sonnet
+    prompt: |
+      calc.go has a bug: Add subtracts instead of adding. Fix it so Add returns
+      a + b. Change only what is necessary, and keep the doc comment accurate.
+    inputs:
+      repo: in.workspace
+    expect:
+      - calc.go # asserted at capture, before any judge is paid
+    outputs:
+      summary: string
+    gate:
+      judges: [claude/haiku, claude/sonnet, claude/opus]
+      criteria: >
+        Accept ONLY if the diff makes Add return the SUM of a and b, changes
+        nothing unrelated, and leaves the package compiling. Be harsh.
+
+  test:
+    agent: claude-ws/sonnet
+    prompt: |
+      Add a file calc_test.go with a Go test asserting Add(2, 3) == 5.
+      Read calc.go first; Add is already implemented correctly.
+    inputs:
+      repo: fix.workspace # the tree `fix` produced, materialized fresh
+    expect:
+      - calc.go
+      - calc_test.go
+    outputs:
+      summary: string

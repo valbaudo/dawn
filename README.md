@@ -18,8 +18,6 @@ and everything else is plain code whose dependency arrows all point at `aw`.
 | `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures + materializes a tree | `aw`, `store` |
 | `plan/` | strict static-DAG runner: typed output, no control flow, identity-keyed reuse | `aw`, `store`, `gate`, `yaml.v3` |
 | `cmd/aw/` | `aw run` and `aw show` | all |
-| `cmd/aw-fix/` | kind-2 demo: claude edits a throwaway repo, jury judges the diff | claude, gate, store |
-| `cmd/aw-chain/` | workspace forward: fix a repo, feed the result to a second agent | claude, store |
 
 Add a backend or a store behind its interface; the core never changes. Resume is not a
 feature and not a flag: a step's identity is a hash of the question it asks (its
@@ -41,8 +39,10 @@ go run ./cmd/aw run  examples/pipeline.yaml      # again: zero paid work
 go run ./cmd/aw run  examples/pipeline.yaml --redo draft
 go run ./cmd/aw show examples/pipeline.yaml tighten.sentence
 go run ./cmd/aw run  examples/gated.yaml         # a gated step: draft -> 3-model panel -> repair
-go run ./cmd/aw-fix                             # claude fixes a bug; jury judges the diff
-go run ./cmd/aw-chain                           # fix a repo, feed repo@v2 to a second agent
+
+# two agents editing a real repo, the tree flowing between them:
+go run ./cmd/aw run  examples/repo.yaml --in examples/calc
+go run ./cmd/aw show examples/repo.yaml test.workspace --in examples/calc | tar -x -C out/
 ```
 
 ## The plan format
@@ -106,7 +106,7 @@ An invocation produces state refs (`Result.Produced`) and consumes them
 (`Invocation.Inputs`). A `Workspace` invocation captures its tree as a
 content-addressed `workspace` ref; a later invocation materializes that ref into
 a fresh dir and builds on it — so `repo@v1 → agent → repo@v2 → agent → repo@v3`
-flows with no shared mutable directory. `cmd/aw-chain` demonstrates it.
+flows with no shared mutable directory. `examples/repo.yaml` demonstrates it.
 
 A tree ref is a git tree sha, so identity really is the content: the same bytes
 captured on another day, by another user, on another machine give the same ref.

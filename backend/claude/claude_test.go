@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/valbaudo/aw"
+	"github.com/valbaudo/aw/store"
 )
 
 // extractJSON is the adapter's parse boundary. It must never invent a value for
@@ -121,5 +122,51 @@ func TestTimeoutDefaults(t *testing.T) {
 	}
 	if got := timeoutOr(2 * time.Second); got != 2*time.Second {
 		t.Fatalf("an explicit timeout must win, got %v", got)
+	}
+}
+
+// The two backends diverged once: Workspace ignored in.Schema and returned a fixed
+// {summary, diff, base, tree}, so any step declaring its own outputs failed
+// validation on the BACKEND's keys ("output has undeclared field \"base\"").
+// Both must honor the schema, and a tree-capturing run may add only the reserved
+// `diff` on top of it.
+func TestWorkspaceHonorsTheSchema(t *testing.T) {
+	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "cas"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// a fake agent that edits a file and answers with the requested JSON
+	bin := fakeCLI(t, `echo edited > a.txt
+echo '{"type":"result","is_error":false,"result":"{\"summary\":\"did it\"}","usage":{}}'`)
+
+	w := Workspace{Dir: work, Model: "haiku", Bin: bin, Trees: trees}
+	res, err := w.Invoke(context.Background(), aw.Invocation{
+		Prompt: "edit it",
+		Schema: map[string]any{
+			"type": "object", "additionalProperties": false,
+			"required":   []any{"summary"},
+			"properties": map[string]any{"summary": map[string]any{"type": "string"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := res.Output["summary"].(string); got != "did it" {
+		t.Fatalf("the declared field must come from the model's reply, got %q", got)
+	}
+	for _, leaked := range []string{"base", "tree"} {
+		if _, bad := res.Output[leaked]; bad {
+			t.Fatalf("%q must stay internal: a backend key that is neither declarable nor reserved fails validation", leaked)
+		}
+	}
+	if _, ok := res.Output["diff"].(string); !ok {
+		t.Fatal("diff is reserved and must be present")
+	}
+	if ref, ok := res.Produced["workspace"]; !ok || ref.Kind != aw.KindWorkspace {
+		t.Fatalf("the captured tree must arrive as a workspace ref, got %+v", res.Produced)
 	}
 }

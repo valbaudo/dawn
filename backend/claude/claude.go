@@ -85,13 +85,9 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 	if system == "" {
 		system = defaultSystem
 	}
-	prompt := in.Prompt
-	if in.Schema != nil {
-		hint, err := json.Marshal(in.Schema)
-		if err != nil {
-			return aw.Result{}, fmt.Errorf("claude: bad schema: %w", err)
-		}
-		prompt += "\n\nRespond with ONLY one JSON object matching this schema — no prose, no code fences:\n" + string(hint)
+	prompt, err := withSchema(in.Prompt, in.Schema)
+	if err != nil {
+		return aw.Result{}, err
 	}
 
 	bin := b.Bin
@@ -122,13 +118,9 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 		return aw.Result{}, fmt.Errorf("claude: reported error: %s", env.Result)
 	}
 
-	output := map[string]any{"text": env.Result}
-	if in.Schema != nil {
-		parsed, err := extractJSON(env.Result)
-		if err != nil {
-			return aw.Result{}, err
-		}
-		output = parsed
+	output, err := parseReply(env.Result, in.Schema)
+	if err != nil {
+		return aw.Result{}, err
 	}
 	return aw.Result{
 		Output: output,
@@ -159,6 +151,31 @@ func extractJSON(s string) (map[string]any, error) {
 		}
 	}
 	return nil, fmt.Errorf("claude: reply contained no JSON object: %s", elide(strings.TrimSpace(s), 200))
+}
+
+// withSchema appends the typed-output contract to a prompt. Shared by both
+// backends: they diverged once — the workspace backend returned a fixed field set
+// and ignored the schema entirely, so a step declaring its own outputs failed
+// validation on the backend's own keys.
+func withSchema(prompt string, schema map[string]any) (string, error) {
+	if schema == nil {
+		return prompt, nil
+	}
+	hint, err := json.Marshal(schema)
+	if err != nil {
+		return "", fmt.Errorf("claude: bad schema: %w", err)
+	}
+	return prompt + "\n\nRespond with ONLY one JSON object matching this schema — no prose, no code fences:\n" + string(hint), nil
+}
+
+// parseReply turns a CLI reply into typed output, honoring the declared schema.
+// The `diff` key is added by a tree-capturing caller and is RESERVED, so a plan
+// may reference it without declaring it.
+func parseReply(reply string, schema map[string]any) (map[string]any, error) {
+	if schema == nil {
+		return map[string]any{"text": reply}, nil
+	}
+	return extractJSON(reply)
 }
 
 // timeoutOr resolves a zero timeout to the default.

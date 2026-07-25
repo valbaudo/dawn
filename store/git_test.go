@@ -240,3 +240,36 @@ func TestCaptureFailsOnAMissingDeclaredPath(t *testing.T) {
 		t.Fatalf("the error must name the missing path, got: %v", err)
 	}
 }
+
+// A relative working directory must capture correctly. It did not: the command
+// runs with cmd.Dir set to the same path, so a relative GIT_WORK_TREE was
+// resolved twice — `--in examples/calc` went looking for
+// examples/calc/examples/calc. Found by pointing --in at a real relative path.
+func TestCaptureAcceptsARelativeWorkDir(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	base := t.TempDir()
+	work := filepath.Join(base, "repo")
+	writeFile(t, work, "a.txt", "alpha\n")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(base); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	ref, err := tr.Capture(ctx, "repo") // relative, as a CLI user would type it
+	if err != nil {
+		t.Fatalf("a relative work dir must capture: %v", err)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, ref, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "a.txt"))
+	if err != nil || string(got) != "alpha\n" {
+		t.Fatalf("relative capture lost content: %q %v", got, err)
+	}
+}

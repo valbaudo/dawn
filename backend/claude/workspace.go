@@ -58,7 +58,10 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 	if model == "" {
 		model = w.Model
 	}
-	prompt := in.Prompt
+	prompt, err := withSchema(in.Prompt, in.Schema)
+	if err != nil {
+		return aw.Result{}, err
+	}
 	if in.System != "" {
 		prompt = in.System + "\n\n" + prompt
 	}
@@ -126,8 +129,18 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 	if err != nil {
 		return aw.Result{}, err
 	}
+	// The model's own reply is parsed against the step's declared outputs, exactly
+	// as the text backend does. Only `diff` is added, and only because it is a
+	// RESERVED name a plan may reference without declaring. `base` and the raw
+	// tree stay internal: the tree is already the workspace ref below, and a
+	// backend field that is neither declarable nor reserved would fail validation.
+	output, err := parseReply(env.Result, in.Schema)
+	if err != nil {
+		return aw.Result{}, err
+	}
+	output["diff"] = diff
 	return aw.Result{
-		Output: map[string]any{"summary": env.Result, "diff": diff, "base": base, "tree": tree},
+		Output: output,
 		Tokens: aw.Tokens{
 			Input:       env.Usage.InputTokens,
 			Output:      env.Usage.OutputTokens,
