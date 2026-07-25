@@ -406,6 +406,52 @@ answer, and it costs zero keys.**
 
 ---
 
+## 8 · Fan-out, and where the line is
+
+Two questions get conflated here. Separating them dissolves most of the problem.
+
+**The money question needs no language support.** Because the cache is keyed on the
+leading tokens (§2), N same-model invocations that begin with an identical block all
+hit that block, with no session and no construct. Fan-out is cache-efficient when
+the runtime puts shared content first and per-item content last — obligations 1 and
+2, which apply to every step anyway. There is no session-shaped shortcut to reach
+for either: `--fork-session` measurably inherits nothing.
+
+**The language question is refused in v1**, and the reason is not "loops are scary":
+
+> Fan-out without fan-in is useless, and fan-in is where the predecessor ballooned.
+
+A `map:` key immediately owes answers to: how is one instance's output referenced;
+how are *all* instances' outputs referenced; what type is that collection when the
+type vocabulary is `string | [enum]`; what happens when instance 7 of 20 fails or
+its gate refuses; does the reduce step see partial results; what is the identity key
+of a reduce whose inputs are a set. In the predecessor those questions produced
+`map`, `reduce`, `prune`, `quorum`, and a cross-cutting rule about what a value
+*means* after it crosses `gate → map → reduce → resume`. That is the combinatorial
+cost this rebuild exists to escape.
+
+**Where the line sits, for when it is revisited.** Cardinality is the whole test:
+
+| shape | cardinality known | verdict |
+|---|---|---|
+| N steps written out | at authoring time | works today |
+| `over:` a declared literal list | at load time | *could* be data |
+| `over:` a runtime-produced array | only after a step runs | a program |
+
+Only the middle row is arguable, and even it must earn its keep against the reduce
+problem above. The bottom row breaks three properties at once: `--dry-run` cannot
+count the bill, the reference grammar has no way to name instance *k*, and the
+identity key of the fan-in is not computable until the fan-out has run.
+
+**What to do today:** write the N steps. It is more lines and it is honest lines —
+each one is independently keyed, independently gated, independently resumable, and
+visible in `--dry-run`. And note the one fan-out that already exists needs no key at
+all: **the jury**, which fans a candidate to N judges concurrently and reduces by
+quorum. That is a fan-out with a fixed fan-in rule, which is exactly why it can be
+data instead of syntax.
+
+---
+
 ## Refused
 
 Each is a parse error with a one-sentence message naming the alternative.
@@ -446,10 +492,15 @@ Each is a parse error with a one-sentence message naming the alternative.
    should be near zero. For a CLI without it the schema arrives as prompt text and
    the conformance rate is unknown. Measure before the second backend lands; the fix
    is a hardcoded 1, not a key.
-5. **Fan-out over a runtime list** (`map:`) is deferred, not refused forever. Static
-   fan-out is expressible today by writing N steps. The line to hold: fan-out over a
-   *declared* list is data; fan-out over a *runtime-produced* list needs a
-   cardinality nobody can check at load time, which is where DAG becomes program.
+5. ~~Fan-out~~ — **settled, see §8.** Refused in v1 because fan-out without fan-in is
+   useless and fan-in is where the predecessor ballooned. The cache motivation for it
+   dissolved: prefix ordering already makes same-model fan-out cache-efficient with
+   no construct at all.
+6. **The `--jobs` question.** Runs are sequential (§1) and the jury is the only
+   concurrency. That is right for a first version — it deletes journal interleaving
+   and rate-limit meltdowns — but an unattended overnight run of a 12-step plan pays
+   for it in wall clock. Revisit as a flag, with a measured number, once a real plan
+   is slow rather than hypothetically slow.
 
 ---
 
@@ -458,12 +509,17 @@ Each is a parse error with a one-sentence message naming the alternative.
 Built today: `version` `agents` `steps` `id` `agent` `prompt` `inputs` `gate`
 (judges/criteria/quorum/attempts), load-time reference + cycle checks, per-step
 scratch dirs, tree capture/materialize, fail-closed gates, append-only commits,
-process-group timeouts.
+process-group timeouts, **deterministic sorted input folding** (runtime obligation
+2 — was a real bug, see below).
 
 Not yet: `output:` as a typed map (today it's one string field) · `expect:` ·
 `--in`/`--dir`/`--redo`/`--dry-run`/`aw show` · the identity key and journal (today
 resume is a step-id map, i.e. latest-wins) · cutting `needs:` and `attempts:` ·
-sorted input folding (**a real bug**: a Go map range over 3 inputs produced 3
-distinct hashes in 200 runs, so any step with 2+ scalar inputs currently gets
-different prompt bytes every run) · committing the attempt the panel approved
-*by index* rather than the last one generated.
+committing the attempt the panel approved *by index* rather than the last one
+generated · a stable emitted system prompt (runtime obligation 1).
+
+Fixed while writing this spec, both found by specifying rather than by a bug report:
+the input fold used a Go map range, so any step with 2+ scalar inputs produced
+different prompt bytes every run and could never hit a cache; and `git add -A`
+silently drops a `.gitignore`'d declared artifact, which `expect:` closes with
+`git add -f --`.
