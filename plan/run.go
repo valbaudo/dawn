@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/valbaudo/dawn"
 	"github.com/valbaudo/dawn/gate"
@@ -52,8 +53,11 @@ type Runner struct {
 	Journal *Journal        // optional; nil means never reuse and never record
 	Redo    map[string]bool // step ids to re-run even on a hit, this run only
 	Root    *dawn.Ref       // optional: the tree bound by --in, referenced as in.workspace
+	Jobs    int             // max steps in flight; 0 or 1 is sequential
 	Backend func(Agent) (dawn.Backend, error)
 	Log     func(format string, args ...any)
+
+	logMu sync.Mutex // Log is called from workers once Jobs > 1
 }
 
 // Run executes the plan in dependency order, reusing any step whose identity key
@@ -88,80 +92,233 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 		}
 	}
 
-	// Single-writer by construction: the loop below is the only thing that touches
-	// `done`, and it is sequential. Parallelizing that range therefore needs a mutex
-	// HERE before it needs anything from the filesystem — a plain map racing on
-	// write is `fatal error: concurrent map writes`, which fires long before two
-	// workspaces could ever collide. Deliberately unlocked today: one goroutine, no
-	// contention, and a mutex guarding a sequential loop misrepresents the code.
+	// EVERYTHING that mutates run state, and everything that WRITES it, happens in
+	// this goroutine. Workers only make the expensive call and hand the result
+	// back, so `Jobs` buys concurrency without touching the invariant that the
+	// interpreter is the sole writer of durable state.
 	done := map[string]StepResult{}
 	if r.Root != nil {
 		// The reserved root step: a value in the graph, not a special case in bind.
 		done[RootStep] = StepResult{Produced: map[string]dawn.Ref{"workspace": *r.Root}}
 	}
 
-	for _, id := range order {
-		s := p.Steps[id]
-		bound, err := r.bind(s, done)
-		if err != nil {
-			return done, fmt.Errorf("step %q: %w", id, err)
-		}
-		agent, err := ParseAgent(s.Agent)
-		if err != nil {
-			return done, fmt.Errorf("step %q: %w", id, err)
-		}
-		key, err := s.Key(id, agent, bound.key)
-		if err != nil {
-			return done, fmt.Errorf("step %q: %w", id, err)
-		}
+	sch := newSchedule(p, order)
+	type finished struct {
+		id  string
+		res dawn.Result
+		err error
+	}
+	fin := make(chan finished)
+	keys := map[string]string{} // id -> identity key, for the commit
+	who := map[string]Agent{}   // id -> agent, for the journal line
+	errs := map[string]error{}  // id -> why it failed
+	inflight, stopped := 0, false
 
-		if r.Journal != nil && !r.Redo[id] {
-			if ref, ok := r.Journal.Lookup(key); ok {
-				rec, err := load(r.Blobs, ref)
-				if err != nil {
-					return done, fmt.Errorf("step %q: %w", id, err)
-				}
-				rec.Ref = ref
+	jobs := max(r.Jobs, 1)
+	for {
+		for !stopped && inflight < jobs && sch.pending() {
+			id := sch.take()
+			s := p.Steps[id]
+			// Bound HERE, not in the worker. A step becomes ready only once every
+			// upstream has committed, so `done` is stable for this read and needs no
+			// lock — the frontier is the synchronization.
+			bound, agent, key, err := r.prepare(id, s, done)
+			if err != nil {
+				errs[id], stopped = err, true
+				break
+			}
+			rec, hit, err := r.reuse(id, key)
+			if err != nil {
+				errs[id], stopped = err, true
+				break
+			}
+			if hit {
+				r.logf("skip %s (%s)", id, short(rec.Ref))
+				sch.complete(id)
 				done[id] = rec
-				r.logf("skip %s (%s)", id, short(ref))
 				continue
 			}
+			keys[id], who[id] = key, agent
+			inflight++
+			go func() {
+				res, err := r.execute(ctx, id, s, bound)
+				fin <- finished{id, res, err}
+			}()
+		}
+		if inflight == 0 {
+			break
 		}
 
-		res, err := r.execute(ctx, id, s, bound)
-		if err != nil {
+		f := <-fin
+		inflight--
+		if f.err != nil {
 			var rej *RejectedError
-			if r.Journal != nil && errors.As(err, &rej) {
+			if r.Journal != nil && errors.As(f.err, &rej) {
 				// Recorded for forensics, with no ref, so it can never serve a hit.
-				_ = r.Journal.Append(Entry{Key: key, Step: id, Rejected: rej.Objections})
+				_ = r.Journal.Append(Entry{Key: keys[f.id], Step: f.id, Rejected: rej.Objections})
 			}
-			return done, fmt.Errorf("step %q: %w", id, err)
+			errs[f.id], stopped = fmt.Errorf("step %q: %w", f.id, f.err), true
+			// Not cancelled: the others are already paid for, and a step that
+			// commits is a step the next run skips. Stop LAUNCHING, then drain.
+			continue
 		}
+		res, err := r.commit(f.id, keys[f.id], who[f.id], f.res)
+		if err != nil {
+			errs[f.id], stopped = err, true
+			continue
+		}
+		sch.complete(f.id)
+		done[f.id] = res
+		r.logf("done %s -> %s", f.id, short(res.Ref))
+	}
 
-		// Blob FIRST, then the journal line: a crash between them leaves an orphan
-		// blob (harmless), never a journal pointer to bytes that do not exist.
-		blob, err := json.Marshal(stepBlob{Output: res.Output, Produced: res.Produced})
-		if err != nil {
-			return done, err
-		}
-		ref, err := r.Blobs.Put(blob)
-		if err != nil {
-			return done, err
-		}
-		if r.Journal != nil {
-			if err := r.Journal.Append(Entry{
-				Key: key, Ref: ref, Step: id, Agent: agent.String(),
-				Tokens: &Tokens{In: res.Tokens.Input, Out: res.Tokens.Output,
-					CacheRead: res.Tokens.CacheRead, CacheCreate: res.Tokens.CacheCreate},
-			}); err != nil {
-				return done, err
+	if len(errs) > 0 {
+		// Report the failure earliest in topological order. Which worker lost first
+		// is a race; which step is at fault is not, so the same broken plan reports
+		// the same error whatever the scheduler did.
+		first := ""
+		for id := range errs {
+			if first == "" || sch.rank[id] < sch.rank[first] {
+				first = id
 			}
 		}
-		res.Ref = ref
-		done[id] = res
-		r.logf("done %s -> %s", id, short(ref))
+		return done, errs[first]
 	}
 	return done, nil
+}
+
+// schedule is the DAG frontier: how many distinct upstreams each step is still
+// waiting on, and whom to unlock when one lands.
+//
+// DISTINCT is load-bearing. Two inputs drawn from one upstream is one edge;
+// counting it twice leaves the step waiting forever on a debt already paid.
+type schedule struct {
+	waiting map[string]int      // id -> upstreams not yet committed
+	unlocks map[string][]string // id -> steps waiting on it
+	rank    map[string]int      // id -> position in topological order
+	ready   []string
+}
+
+func newSchedule(p *Plan, order []string) *schedule {
+	s := &schedule{
+		waiting: map[string]int{}, unlocks: map[string][]string{}, rank: map[string]int{},
+	}
+	for i, id := range order {
+		s.rank[id] = i
+	}
+	for _, id := range order {
+		ups := map[string]bool{}
+		for _, ref := range p.Steps[id].Inputs {
+			did, _, _ := ParseRef(ref)
+			if did == RootStep {
+				continue // always available; validate proved --in was given
+			}
+			if _, ok := p.Steps[did]; ok {
+				ups[did] = true
+			}
+		}
+		s.waiting[id] = len(ups)
+		for up := range ups {
+			s.unlocks[up] = append(s.unlocks[up], id)
+		}
+	}
+	for _, id := range order {
+		if s.waiting[id] == 0 {
+			s.ready = append(s.ready, id)
+		}
+	}
+	return s
+}
+
+func (s *schedule) pending() bool { return len(s.ready) > 0 }
+
+// take pops the ready step that comes FIRST in topological order, so --jobs 1
+// reproduces the old sequential order exactly rather than merely some valid one.
+// A run whose log order shifts when nothing else changed is a run you cannot
+// diff against yesterday's.
+func (s *schedule) take() string {
+	best := 0
+	for i := 1; i < len(s.ready); i++ {
+		if s.rank[s.ready[i]] < s.rank[s.ready[best]] {
+			best = i
+		}
+	}
+	id := s.ready[best]
+	s.ready = append(s.ready[:best], s.ready[best+1:]...)
+	return id
+}
+
+// complete releases the steps that were waiting on id.
+func (s *schedule) complete(id string) {
+	for _, d := range s.unlocks[id] {
+		s.waiting[d]--
+		if s.waiting[d] == 0 {
+			s.ready = append(s.ready, d)
+		}
+	}
+}
+
+// prepare resolves a step's inputs and identity, all of which read `done` and so
+// must happen on the scheduling goroutine.
+func (r *Runner) prepare(id string, s Step, done map[string]StepResult) (bound, Agent, string, error) {
+	b, err := r.bind(s, done)
+	if err != nil {
+		return bound{}, Agent{}, "", fmt.Errorf("step %q: %w", id, err)
+	}
+	agent, err := ParseAgent(s.Agent)
+	if err != nil {
+		return bound{}, Agent{}, "", fmt.Errorf("step %q: %w", id, err)
+	}
+	key, err := s.Key(id, agent, b.key)
+	if err != nil {
+		return bound{}, Agent{}, "", fmt.Errorf("step %q: %w", id, err)
+	}
+	return b, agent, key, nil
+}
+
+// reuse returns a committed result for key, if the journal holds one.
+//
+// A journal line pointing at bytes that are gone is a BROKEN STORE, not a miss.
+// Degrading it to a miss would silently re-pay for work already bought and paper
+// over the corruption, so it propagates.
+func (r *Runner) reuse(id, key string) (StepResult, bool, error) {
+	if r.Journal == nil || r.Redo[id] {
+		return StepResult{}, false, nil
+	}
+	ref, ok := r.Journal.Lookup(key)
+	if !ok {
+		return StepResult{}, false, nil
+	}
+	rec, err := load(r.Blobs, ref)
+	if err != nil {
+		return StepResult{}, false, fmt.Errorf("step %q: %w", id, err)
+	}
+	rec.Ref = ref
+	return rec, true, nil
+}
+
+// commit content-addresses a result and then records the pointer. Blob FIRST: a
+// crash between the two leaves an orphan blob, which is harmless garbage, where
+// the other order leaves a journal pointer to bytes that do not exist.
+func (r *Runner) commit(id, key string, agent Agent, res dawn.Result) (StepResult, error) {
+	blob, err := json.Marshal(stepBlob{Output: res.Output, Produced: res.Produced})
+	if err != nil {
+		return StepResult{}, err
+	}
+	ref, err := r.Blobs.Put(blob)
+	if err != nil {
+		return StepResult{}, err
+	}
+	if r.Journal != nil {
+		if err := r.Journal.Append(Entry{
+			Key: key, Ref: ref, Step: id, Agent: agent.String(),
+			Tokens: &Tokens{In: res.Tokens.Input, Out: res.Tokens.Output,
+				CacheRead: res.Tokens.CacheRead, CacheCreate: res.Tokens.CacheCreate},
+		}); err != nil {
+			return StepResult{}, err
+		}
+	}
+	return StepResult{Output: res.Output, Produced: res.Produced, Tokens: res.Tokens, Ref: ref}, nil
 }
 
 // bound is a step's resolved inputs: what the agent is asked, what refs it
@@ -209,10 +366,10 @@ func (r *Runner) backendFor(s Step) (dawn.Backend, error) {
 	return r.Backend(a)
 }
 
-func (r *Runner) execute(ctx context.Context, id string, s Step, b bound) (StepResult, error) {
+func (r *Runner) execute(ctx context.Context, id string, s Step, b bound) (dawn.Result, error) {
 	backend, err := r.backendFor(s)
 	if err != nil {
-		return StepResult{}, err
+		return dawn.Result{}, err
 	}
 	// The schema is pushed to the agent as an OPTIMIZATION. It is never the
 	// authority: Step.Validate re-checks locally on every backend, always.
@@ -229,9 +386,9 @@ func (r *Runner) execute(ctx context.Context, id string, s Step, b bound) (StepR
 		res, err = r.runGated(ctx, id, s, backend, inv)
 	}
 	if err != nil {
-		return StepResult{}, err
+		return dawn.Result{}, err
 	}
-	return StepResult{Output: res.Output, Produced: res.Produced, Tokens: res.Tokens}, nil
+	return res, nil
 }
 
 // runGated generates, submits the result to an independent panel, and repairs
@@ -339,10 +496,16 @@ func load(b store.Blobs, ref string) (StepResult, error) {
 	return StepResult{Output: blob.Output, Produced: blob.Produced}, nil
 }
 
+// logf serializes the log. Above --jobs 1 this is called from workers, and two
+// half-written lines interleaved is the kind of output that makes an operator
+// distrust the whole log at 3am.
 func (r *Runner) logf(format string, args ...any) {
-	if r.Log != nil {
-		r.Log(format, args...)
+	if r.Log == nil {
+		return
 	}
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+	r.Log(format, args...)
 }
 
 func short(ref string) string {

@@ -1,6 +1,6 @@
 // Command dawn runs and inspects agent plans.
 //
-//	dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]…
+//	dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]… [--jobs N]
 //	dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]…
 //
 // `run` executes the plan's steps in dependency order, committing each step's
@@ -57,9 +57,9 @@ func main() {
 		// it. Unattended, an orphaned agent CLI keeps burning tokens against a run
 		// nobody is waiting for.
 		//
-		// No second-signal force-quit: shutdown is already bounded by
-		// proc.WaitDelay per child and the DAG is sequential, so there is at most
-		// one group to reap.
+		// No second-signal force-quit: shutdown is bounded by proc.WaitDelay per
+		// child, and the groups are reaped concurrently, so --jobs N costs the same
+		// wall clock to shut down as --jobs 1.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := execute(ctx, cmd, args); err != nil {
@@ -104,7 +104,7 @@ func usagef(format string, a ...any) error { return &usageError{fmt.Errorf(forma
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:\n"+
-		"  dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]...\n"+
+		"  dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]... [--jobs N]\n"+
 		"  dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]...")
 	os.Exit(exitUsage)
 }
@@ -119,10 +119,17 @@ func execute(ctx context.Context, cmd string, args []string) error {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	dir := fs.String("dir", ".dawn", "state directory: blobs/, trees/ and journal.jsonl")
 	in := fs.String("in", "", "host directory bound to the reserved step `in`")
+	jobs := fs.Int("jobs", 1, "steps to run at once; independent steps only")
 	var redo repeated
 	fs.Var(&redo, "redo", "step to re-run even if committed (repeatable)")
 	if err := fs.Parse(flags); err != nil {
 		return &usageError{err}
+	}
+	// Refused rather than clamped. A silently-corrected 0 is how `quorum: 0` once
+	// became a majority, and a knob that ignores what you typed is worse than one
+	// that refuses it.
+	if *jobs < 1 {
+		return usagef("--jobs must be at least 1, got %d", *jobs)
 	}
 	switch {
 	case len(positional) == 0:
@@ -149,7 +156,7 @@ func execute(ctx context.Context, cmd string, args []string) error {
 		return err
 	}
 
-	r := &plan.Runner{Blobs: blobs, Journal: journal, Redo: redo.set(), Backend: backends(trees)}
+	r := &plan.Runner{Blobs: blobs, Journal: journal, Redo: redo.set(), Jobs: *jobs, Backend: backends(trees)}
 	if *in != "" {
 		tree, err := trees.Capture(ctx, *in)
 		if err != nil {
@@ -264,6 +271,7 @@ func backends(trees *store.Trees) func(plan.Agent) (dawn.Backend, error) {
 func split(args []string) (positional, flags []string) {
 	takesValue := map[string]bool{
 		"-dir": true, "--dir": true, "-in": true, "--in": true, "-redo": true, "--redo": true,
+		"-jobs": true, "--jobs": true,
 	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]

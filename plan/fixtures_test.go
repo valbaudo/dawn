@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/valbaudo/dawn"
@@ -71,15 +72,14 @@ type voter struct {
 	name      string
 	approve   bool
 	flipAfter int
-	seen      *int
+	seen      *atomic.Int64 // atomic: the jury calls every judge concurrently
 }
 
 func (v voter) Name() string { return v.name }
 func (v voter) Invoke(context.Context, dawn.Invocation) (dawn.Result, error) {
 	approved := v.approve
 	if v.seen != nil {
-		*v.seen++
-		if v.flipAfter > 0 && *v.seen > v.flipAfter {
+		if n := v.seen.Add(1); v.flipAfter > 0 && n > int64(v.flipAfter) {
 			approved = true
 		}
 	}

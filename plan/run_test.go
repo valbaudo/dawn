@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/valbaudo/dawn"
@@ -128,7 +129,7 @@ func TestGatedStepFailsClosed(t *testing.T) {
 }
 
 func TestGatedStepRepairs(t *testing.T) {
-	var votes int
+	var votes atomic.Int64
 	r := &Runner{Blobs: store.NewMem(), Backend: panel(map[string]dawn.Backend{
 		"a": voter{name: "a", flipAfter: 1, seen: &votes},
 		"b": voter{name: "b", flipAfter: 1, seen: &votes},

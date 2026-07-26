@@ -7,7 +7,7 @@
 A plan is a static DAG of agent invocations. One mechanism — a **named input** —
 carries every kind of state a step needs. No sessions, no templating, no control flow.
 
-**10 keys · 2 type forms · 2 commands · 3 flags.**
+**10 keys · 2 type forms · 2 commands · 4 flags.**
 
 > **Work is input-addressed. Values are content-addressed.**
 > A step's identity is a claim about the *question asked*; a ref is a claim about the
@@ -103,7 +103,23 @@ conformance: every declared field is present
 ⟹ a reference that loads can never resolve to a missing value
 ```
 
-Runs are sequential. The jury is the only fan-out, and it already runs concurrently.
+**`--jobs N` runs independent steps at once, and needs no key.** The DAG already says
+which steps are independent — `left` and `right` both reading `root.text` have no edge
+between them — so concurrency is a property of the graph the author already wrote, and a
+flag is the whole implementation. Nothing about a plan's meaning changes: `--jobs` moves
+*when* work happens, never *what* is computed or reused.
+
+Ordering is still the graph's. `--jobs 1` is the default and reproduces the sequential
+order exactly, not merely some valid topological one, so two runs stay diffable.
+
+Two honest edges. A failure stops the run from **launching** anything further but does not
+cancel what is in flight — that work is already paid for, and a step that commits is a step
+the next run skips. And the error reported is the one earliest in topological order, not
+the first to arrive, so a broken plan blames the same step every time.
+
+`--jobs` counts STEPS, and a gate multiplies it: `--jobs 4` over steps with three judges
+each is up to sixteen agent processes at once. Provider rate limits are the real ceiling,
+not cores.
 
 ---
 
@@ -376,13 +392,16 @@ isolation-shaped fix.
 ## The CLI
 
 ```
-dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]…
-dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]…
+dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]… [--jobs N]
+dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]… [--jobs N]
 
 REF ::= <step>[.<field>]     the plan's own grammar, same code path as a load-time check
 ```
 
-Both commands take all three flags; there is no flag legal on one and not the other.
+Both commands take all four flags; there is no flag legal on one and not the other.
+`--jobs` is inert on `show`, which executes nothing — accepted rather than special-cased,
+because a flag that is legal here and illegal there is a rule to remember. It must be at
+least 1: a silently-corrected `0` is how `quorum: 0` once became a majority.
 
 **`dawn show PLAN` with no REF is the dry run**: per-step fresh/stale plus the worst-case
 bill. `--dry-run` is deleted because "a mode of run that does not run" always grows a
@@ -516,8 +535,8 @@ and a posture that dangerous should be a word an author typed.
 2. **Which criteria are actually judgeable.** "The diff must not delete tests" is
    enforceable; "the tool is correct" is not; both compile to the same YAML. The fix is a
    manual of worked criteria, not a feature.
-3. **Sequential execution.** The jury is the only concurrency. Right for a first version;
-   revisit `--jobs` with a measured number when a real plan is slow.
+3. ~~**Sequential execution.**~~ Answered: `--jobs N`. It changed no keys, because the DAG
+   already said which steps are independent — the flag only stopped ignoring it.
 4. **`--in` is required for `dawn show PLAN`** (pricing needs the input digest) but optional
    for `dawn show PLAN REF` (reading a committed artifact must not need live host state).
    Documented rather than papered over.
