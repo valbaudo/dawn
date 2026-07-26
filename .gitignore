@@ -5,5 +5,5 @@
 *.out
 
 # local run state / stores (README examples)
-/.aw/
+/.dawn/
 run.json

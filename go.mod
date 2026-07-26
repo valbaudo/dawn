@@ -1,4 +1,4 @@
-module github.com/valbaudo/aw
+module github.com/valbaudo/dawn
 
 go 1.26
 

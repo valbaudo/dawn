@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/valbaudo/aw"
-	"github.com/valbaudo/aw/store"
+	"github.com/valbaudo/dawn"
+	"github.com/valbaudo/dawn/store"
 )
 
 // extractJSON is the adapter's parse boundary. It must never invent a value for
@@ -87,7 +87,7 @@ func TestInvokeTimesOut(t *testing.T) {
 	b := Backend{Model: "haiku", Bin: bin, Timeout: 300 * time.Millisecond}
 
 	start := time.Now()
-	_, err := b.Invoke(context.Background(), aw.Invocation{Prompt: "hi"})
+	_, err := b.Invoke(context.Background(), dawn.Invocation{Prompt: "hi"})
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -103,7 +103,7 @@ func TestInvokeUnderTheDeadlineSucceeds(t *testing.T) {
 	bin := fakeCLI(t, `echo '{"type":"result","is_error":false,"result":"pong","usage":{"input_tokens":3,"output_tokens":1}}'`)
 	b := Backend{Model: "haiku", Bin: bin}
 
-	res, err := b.Invoke(context.Background(), aw.Invocation{Prompt: "ping"})
+	res, err := b.Invoke(context.Background(), dawn.Invocation{Prompt: "ping"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestWorkspaceHonorsTheSchema(t *testing.T) {
 echo '{"type":"result","is_error":false,"result":"{\"summary\":\"did it\"}","usage":{}}'`)
 
 	w := Workspace{Dir: work, Model: "haiku", Bin: bin, Trees: trees}
-	res, err := w.Invoke(context.Background(), aw.Invocation{
+	res, err := w.Invoke(context.Background(), dawn.Invocation{
 		Prompt: "edit it",
 		Schema: map[string]any{
 			"type": "object", "additionalProperties": false,
@@ -166,7 +166,7 @@ echo '{"type":"result","is_error":false,"result":"{\"summary\":\"did it\"}","usa
 	if _, ok := res.Output["diff"].(string); !ok {
 		t.Fatal("diff is reserved and must be present")
 	}
-	if ref, ok := res.Produced["workspace"]; !ok || ref.Kind != aw.KindWorkspace {
+	if ref, ok := res.Produced["workspace"]; !ok || ref.Kind != dawn.KindWorkspace {
 		t.Fatalf("the captured tree must arrive as a workspace ref, got %+v", res.Produced)
 	}
 }

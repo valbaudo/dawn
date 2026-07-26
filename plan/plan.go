@@ -2,7 +2,7 @@
 // of agent steps wired by typed references, executed in dependency order. There is
 // deliberately no templating and no if/loop/map — a step names its inputs, the
 // runner materializes them, and any unknown key is a parse error. Orchestration
-// that needs branches, loops or retries belongs in code around aw, not here.
+// that needs branches, loops or retries belongs in code around dawn, not here.
 //
 // See SPEC.md for the language and, more usefully, for what it refuses.
 package plan
@@ -15,7 +15,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/valbaudo/aw/gate"
+	"github.com/valbaudo/dawn/gate"
 	"gopkg.in/yaml.v3"
 )
 

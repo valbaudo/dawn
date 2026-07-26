@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/valbaudo/aw"
-	"github.com/valbaudo/aw/store"
+	"github.com/valbaudo/dawn"
+	"github.com/valbaudo/dawn/store"
 )
 
 // conform emits exactly the fields the pushed schema requires, echoing v into each
 // free-form one and picking the first member of an enum. A fake that emitted
 // anything else would fail Step.Validate, which is the point.
-func conform(in aw.Invocation, v string) map[string]any {
+func conform(in dawn.Invocation, v string) map[string]any {
 	out := map[string]any{}
 	req, _ := in.Schema["required"].([]any)
 	props, _ := in.Schema["properties"].(map[string]any)
@@ -35,22 +35,22 @@ func conform(in aw.Invocation, v string) map[string]any {
 type echo struct{ calls *int }
 
 func (e echo) Name() string { return "echo" }
-func (e echo) Invoke(_ context.Context, in aw.Invocation) (aw.Result, error) {
+func (e echo) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
 	*e.calls++
-	return aw.Result{Output: conform(in, in.Prompt)}, nil
+	return dawn.Result{Output: conform(in, in.Prompt)}, nil
 }
 
 // producer also emits a workspace ref, standing in for a tree-capturing backend.
-type producer struct{ seen *[]aw.Invocation }
+type producer struct{ seen *[]dawn.Invocation }
 
 func (p producer) Name() string { return "producer" }
-func (p producer) Invoke(_ context.Context, in aw.Invocation) (aw.Result, error) {
+func (p producer) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
 	if p.seen != nil {
 		*p.seen = append(*p.seen, in)
 	}
-	return aw.Result{
+	return dawn.Result{
 		Output:   conform(in, in.Prompt),
-		Produced: map[string]aw.Ref{"workspace": {Kind: aw.KindWorkspace, URI: "tree-abc"}},
+		Produced: map[string]dawn.Ref{"workspace": {Kind: dawn.KindWorkspace, URI: "tree-abc"}},
 	}, nil
 }
 
@@ -61,9 +61,9 @@ func (producer) CapturesTree() {}
 type counting struct{ n *int }
 
 func (c counting) Name() string { return "counting" }
-func (c counting) Invoke(_ context.Context, in aw.Invocation) (aw.Result, error) {
+func (c counting) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
 	*c.n++
-	return aw.Result{Output: conform(in, fmt.Sprintf("attempt-%d", *c.n))}, nil
+	return dawn.Result{Output: conform(in, fmt.Sprintf("attempt-%d", *c.n))}, nil
 }
 
 // voter approves or rejects, flipping to approve after flipAfter rejections.
@@ -75,7 +75,7 @@ type voter struct {
 }
 
 func (v voter) Name() string { return v.name }
-func (v voter) Invoke(context.Context, aw.Invocation) (aw.Result, error) {
+func (v voter) Invoke(context.Context, dawn.Invocation) (dawn.Result, error) {
 	approved := v.approve
 	if v.seen != nil {
 		*v.seen++
@@ -83,13 +83,13 @@ func (v voter) Invoke(context.Context, aw.Invocation) (aw.Result, error) {
 			approved = true
 		}
 	}
-	return aw.Result{Output: map[string]any{"approved": approved, "reason": "because " + v.name}}, nil
+	return dawn.Result{Output: map[string]any{"approved": approved, "reason": "because " + v.name}}, nil
 }
 
 // byModel dispatches on the model half of an agent spec, so one plan can mix a
 // generator and several judges.
-func byModel(m map[string]aw.Backend) func(Agent) (aw.Backend, error) {
-	return func(a Agent) (aw.Backend, error) {
+func byModel(m map[string]dawn.Backend) func(Agent) (dawn.Backend, error) {
+	return func(a Agent) (dawn.Backend, error) {
 		b, ok := m[a.Model]
 		if !ok {
 			return nil, fmt.Errorf("no backend for model %q", a.Model)
@@ -112,7 +112,7 @@ func loadPlan(t *testing.T, yaml string) (*Plan, error) {
 }
 
 // durable builds a runner backed by a real store and journal in dir.
-func durable(t *testing.T, dir string, b func(Agent) (aw.Backend, error)) *Runner {
+func durable(t *testing.T, dir string, b func(Agent) (dawn.Backend, error)) *Runner {
 	t.Helper()
 	blobs, err := store.NewFS(filepath.Join(dir, "blobs"))
 	if err != nil {

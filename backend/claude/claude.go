@@ -1,7 +1,7 @@
-// Package claude is an [aw.Backend] that shells out to the `claude -p` CLI on
+// Package claude is an [dawn.Backend] that shells out to the `claude -p` CLI on
 // the local Claude Code subscription. No API key, no container — the leanest
 // black-box-CLI backend. Richer awf-style adapters (codex, droid, an HTTP LLM)
-// port in later behind the same [aw.Backend] seam; this file is the reference
+// port in later behind the same [dawn.Backend] seam; this file is the reference
 // shape for all of them.
 package claude
 
@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valbaudo/aw"
-	"github.com/valbaudo/aw/proc"
+	"github.com/valbaudo/dawn"
+	"github.com/valbaudo/dawn/proc"
 )
 
 // defaultSystem is the stable system prompt used when an Invocation declares
@@ -62,7 +62,7 @@ type claudeEnvelope struct {
 // Invoke runs one call. If in.Schema is set, the prompt asks for exactly that
 // JSON object and the reply is parsed into Result.Output; otherwise Output holds
 // the raw assistant text under the "text" key.
-func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error) {
+func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeoutOr(b.Timeout))
 	defer cancel()
 	model := in.Model
@@ -75,7 +75,7 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 	// byte after the drift point recomputes and the caller's content never caches.
 	// Measured: with the default preset, cache_creation stays ~20.5k on EVERY call
 	// and cache_read never covers the caller's prompt. Passing an explicit system
-	// prompt replaces the preset with bytes aw controls, and the same content then
+	// prompt replaces the preset with bytes dawn controls, and the same content then
 	// reads from cache across unrelated invocations.
 	//
 	// Replacing the preset is right HERE and wrong for Workspace: this backend
@@ -87,7 +87,7 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 	}
 	prompt, err := withSchema(in.Prompt, in.Schema)
 	if err != nil {
-		return aw.Result{}, err
+		return dawn.Result{}, err
 	}
 
 	bin := b.Bin
@@ -101,30 +101,30 @@ func (b Backend) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error
 		"--model", model,
 		"--output-format", "json",
 		"--system-prompt", system,
-		// aw never resumes a session, so persisting one per invocation only
+		// dawn never resumes a session, so persisting one per invocation only
 		// litters ~/.claude/projects with a directory per call.
 		"--no-session-persistence")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return aw.Result{}, fmt.Errorf("claude -p (%s): %w: %s", model, err, strings.TrimSpace(stderr.String()))
+		return dawn.Result{}, fmt.Errorf("claude -p (%s): %w: %s", model, err, strings.TrimSpace(stderr.String()))
 	}
 
 	var env claudeEnvelope
 	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-		return aw.Result{}, fmt.Errorf("claude: parse json: %w", err)
+		return dawn.Result{}, fmt.Errorf("claude: parse json: %w", err)
 	}
 	if env.IsError {
-		return aw.Result{}, fmt.Errorf("claude: reported error: %s", env.Result)
+		return dawn.Result{}, fmt.Errorf("claude: reported error: %s", env.Result)
 	}
 
 	output, err := parseReply(env.Result, in.Schema)
 	if err != nil {
-		return aw.Result{}, err
+		return dawn.Result{}, err
 	}
-	return aw.Result{
+	return dawn.Result{
 		Output: output,
-		Tokens: aw.Tokens{
+		Tokens: dawn.Tokens{
 			Input:       env.Usage.InputTokens,
 			Output:      env.Usage.OutputTokens,
 			CacheRead:   env.Usage.CacheReadTokens,
@@ -194,5 +194,5 @@ func elide(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// compile-time assertion: Backend satisfies the aw.Backend seam.
-var _ aw.Backend = Backend{}
+// compile-time assertion: Backend satisfies the dawn.Backend seam.
+var _ dawn.Backend = Backend{}

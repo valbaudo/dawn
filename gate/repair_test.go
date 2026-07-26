@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/valbaudo/aw"
+	"github.com/valbaudo/dawn"
 )
 
 // contentJudge approves iff the candidate (delivered as in.Prompt) contains the
@@ -14,15 +14,15 @@ import (
 type contentJudge struct{ name string }
 
 func (c contentJudge) Name() string { return c.name }
-func (c contentJudge) Invoke(_ context.Context, in aw.Invocation) (aw.Result, error) {
-	return aw.Result{Output: map[string]any{
+func (c contentJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	return dawn.Result{Output: map[string]any{
 		"approved": strings.Contains(in.Prompt, "good"),
 		"reason":   "must contain the word good",
 	}}, nil
 }
 
-func threeContentJudges() []aw.Backend {
-	return []aw.Backend{contentJudge{"a"}, contentJudge{"b"}, contentJudge{"c"}}
+func threeContentJudges() []dawn.Backend {
+	return []dawn.Backend{contentJudge{"a"}, contentJudge{"b"}, contentJudge{"c"}}
 }
 
 // scripted returns a Generate that yields seq in order (repeating the last),
@@ -39,7 +39,7 @@ func scripted(seen *[]string, seq ...string) Generate {
 		// tell WHICH attempt's artifact came back in the outcome.
 		return Candidate{
 			Text:     s,
-			Produced: map[string]aw.Ref{"workspace": {Kind: aw.KindWorkspace, URI: "tree-" + s}},
+			Produced: map[string]dawn.Ref{"workspace": {Kind: dawn.KindWorkspace, URI: "tree-" + s}},
 		}, nil
 	}
 }
@@ -104,7 +104,7 @@ func TestGateGenerateErrorPropagates(t *testing.T) {
 // propagate as an error, never be counted as a rejection that burns an attempt.
 func TestGateJudgeErrorIsMechanicalNotRejection(t *testing.T) {
 	var fb []string
-	judges := []aw.Backend{
+	judges := []dawn.Backend{
 		contentJudge{"a"},
 		fakeJudge{name: "flaky", err: errors.New("timeout")},
 		contentJudge{"c"},
@@ -142,7 +142,7 @@ func TestGateReturnsAcceptedAttemptsArtifact(t *testing.T) {
 	if ref.URI != "tree-a good draft" {
 		t.Fatalf("got the wrong attempt's artifact: %q (rejected attempt 1 leaked through)", ref.URI)
 	}
-	if ref.Kind != aw.KindWorkspace {
+	if ref.Kind != dawn.KindWorkspace {
 		t.Fatalf("ref kind = %q", ref.Kind)
 	}
 }

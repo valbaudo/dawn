@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/valbaudo/aw"
+	"github.com/valbaudo/dawn"
 )
 
 // fakeJudge is a Backend that votes a fixed way (or errors) without any network.
@@ -17,11 +17,11 @@ type fakeJudge struct {
 }
 
 func (f fakeJudge) Name() string { return f.name }
-func (f fakeJudge) Invoke(context.Context, aw.Invocation) (aw.Result, error) {
+func (f fakeJudge) Invoke(context.Context, dawn.Invocation) (dawn.Result, error) {
 	if f.err != nil {
-		return aw.Result{}, f.err
+		return dawn.Result{}, f.err
 	}
-	return aw.Result{Output: map[string]any{"approved": f.approved, "reason": "test"}}, nil
+	return dawn.Result{Output: map[string]any{"approved": f.approved, "reason": "test"}}, nil
 }
 
 func TestJuryQuorum(t *testing.T) {
@@ -41,7 +41,7 @@ func TestJuryQuorum(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			judges := make([]aw.Backend, len(c.votes))
+			judges := make([]dawn.Backend, len(c.votes))
 			for i, v := range c.votes {
 				judges[i] = fakeJudge{name: "j", approved: v}
 			}
@@ -59,7 +59,7 @@ func TestJuryQuorum(t *testing.T) {
 // An errored judge must not count as an approval — the crash≠verdict invariant
 // in miniature: a judge that failed to run is not a "no", it is simply not a "yes".
 func TestJuryErrorIsNotApproval(t *testing.T) {
-	judges := []aw.Backend{
+	judges := []dawn.Backend{
 		fakeJudge{name: "a", approved: true},
 		fakeJudge{name: "b", err: errors.New("boom")},
 		fakeJudge{name: "c", approved: true},
@@ -85,8 +85,8 @@ type malformedJudge struct {
 }
 
 func (m malformedJudge) Name() string { return m.name }
-func (m malformedJudge) Invoke(context.Context, aw.Invocation) (aw.Result, error) {
-	return aw.Result{Output: m.output}, nil
+func (m malformedJudge) Invoke(context.Context, dawn.Invocation) (dawn.Result, error) {
+	return dawn.Result{Output: m.output}, nil
 }
 
 // A judge that returned no usable verdict has NOT voted no. Reading a missing or
@@ -115,7 +115,7 @@ func TestJudgeMalformedVerdictIsErrorNotRejection(t *testing.T) {
 // repair budget untouched, rather than burning every attempt on a parse bug.
 func TestGateMalformedVerdictDoesNotBurnAttempts(t *testing.T) {
 	var generated []string
-	judges := []aw.Backend{
+	judges := []dawn.Backend{
 		fakeJudge{name: "ok", approved: true},
 		malformedJudge{"chatty", map[string]any{"reason": "Sure! Here you go:"}},
 		fakeJudge{name: "ok2", approved: true},

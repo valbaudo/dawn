@@ -1,9 +1,9 @@
 # Two steps wired by a TYPED reference. `draft.sentence` is checked when the plan
 # loads, against draft's declared outputs — a typo fails before a token is spent.
 #
-#   aw run examples/pipeline.yaml       # commits to .aw/
-#   aw run examples/pipeline.yaml       # again: zero paid work
-#   aw show examples/pipeline.yaml      # what is stale, and the call count
+#   dawn run examples/pipeline.yaml       # commits to .dawn/
+#   dawn run examples/pipeline.yaml       # again: zero paid work
+#   dawn show examples/pipeline.yaml      # what is stale, and the call count
 
 steps:
   draft:

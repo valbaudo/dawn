@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valbaudo/aw"
-	"github.com/valbaudo/aw/proc"
-	"github.com/valbaudo/aw/store"
+	"github.com/valbaudo/dawn"
+	"github.com/valbaudo/dawn/proc"
+	"github.com/valbaudo/dawn/store"
 )
 
-// Workspace is an [aw.Backend] that runs `claude -p` INSIDE a directory, letting
+// Workspace is an [dawn.Backend] that runs `claude -p` INSIDE a directory, letting
 // the agent edit files, and captures the result as a content-addressed tree ref.
 //
 // It snapshots the tree before and after the turn, so Result.Produced carries the
@@ -48,9 +48,9 @@ func (w Workspace) Name() string {
 }
 
 // Invoke runs one editing turn and captures the resulting tree.
-func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, error) {
+func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
 	if w.Trees == nil {
-		return aw.Result{}, fmt.Errorf("workspace: Trees is required")
+		return dawn.Result{}, fmt.Errorf("workspace: Trees is required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeoutOr(w.Timeout))
 	defer cancel()
@@ -60,7 +60,7 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 	}
 	prompt, err := withSchema(in.Prompt, in.Schema)
 	if err != nil {
-		return aw.Result{}, err
+		return dawn.Result{}, err
 	}
 	if in.System != "" {
 		prompt = in.System + "\n\n" + prompt
@@ -74,22 +74,22 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 	if dir == "" {
 		ref, ok := workspaceInput(in.Inputs)
 		if !ok {
-			return aw.Result{}, fmt.Errorf("workspace: set Dir, or pass a workspace ref in Inputs to materialize")
+			return dawn.Result{}, fmt.Errorf("workspace: set Dir, or pass a workspace ref in Inputs to materialize")
 		}
 		d, err := os.MkdirTemp("", "aw-ws-*")
 		if err != nil {
-			return aw.Result{}, err
+			return dawn.Result{}, err
 		}
 		defer os.RemoveAll(d) // the tree is captured below; the dir is scratch
 		if err := w.Trees.Materialize(ctx, ref.URI, d); err != nil {
-			return aw.Result{}, err
+			return dawn.Result{}, err
 		}
 		dir = d
 	}
 
 	base, err := w.Trees.Capture(ctx, dir)
 	if err != nil {
-		return aw.Result{}, err
+		return dawn.Result{}, err
 	}
 
 	// An editing agent NEEDS Claude Code's default system prompt (that is where its
@@ -108,14 +108,14 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return aw.Result{}, fmt.Errorf("claude -p (workspace %s): %w: %s", model, err, strings.TrimSpace(stderr.String()))
+		return dawn.Result{}, fmt.Errorf("claude -p (workspace %s): %w: %s", model, err, strings.TrimSpace(stderr.String()))
 	}
 	var env claudeEnvelope
 	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-		return aw.Result{}, fmt.Errorf("claude: parse json: %w", err)
+		return dawn.Result{}, fmt.Errorf("claude: parse json: %w", err)
 	}
 	if env.IsError {
-		return aw.Result{}, fmt.Errorf("claude: reported error: %s", env.Result)
+		return dawn.Result{}, fmt.Errorf("claude: reported error: %s", env.Result)
 	}
 
 	// Declared paths are forced into the tree AND asserted here — before the diff,
@@ -123,11 +123,11 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 	// anyone paying to review it.
 	tree, err := w.Trees.Capture(ctx, dir, in.Expect...)
 	if err != nil {
-		return aw.Result{}, err
+		return dawn.Result{}, err
 	}
 	diff, err := w.Trees.Diff(ctx, base, tree)
 	if err != nil {
-		return aw.Result{}, err
+		return dawn.Result{}, err
 	}
 	// The model's own reply is parsed against the step's declared outputs, exactly
 	// as the text backend does. Only `diff` is added, and only because it is a
@@ -136,37 +136,37 @@ func (w Workspace) Invoke(ctx context.Context, in aw.Invocation) (aw.Result, err
 	// backend field that is neither declarable nor reserved would fail validation.
 	output, err := parseReply(env.Result, in.Schema)
 	if err != nil {
-		return aw.Result{}, err
+		return dawn.Result{}, err
 	}
 	output["diff"] = diff
-	return aw.Result{
+	return dawn.Result{
 		Output: output,
-		Tokens: aw.Tokens{
+		Tokens: dawn.Tokens{
 			Input:       env.Usage.InputTokens,
 			Output:      env.Usage.OutputTokens,
 			CacheRead:   env.Usage.CacheReadTokens,
 			CacheCreate: env.Usage.CacheCreationTokens,
 		},
-		Produced: map[string]aw.Ref{
-			"workspace": {Kind: aw.KindWorkspace, URI: tree, Media: "application/vnd.git-tree"},
+		Produced: map[string]dawn.Ref{
+			"workspace": {Kind: dawn.KindWorkspace, URI: tree, Media: "application/vnd.git-tree"},
 		},
 	}, nil
 }
 
 // workspaceInput returns the first workspace-kind ref in inputs, if any.
-func workspaceInput(inputs map[string]aw.Ref) (aw.Ref, bool) {
+func workspaceInput(inputs map[string]dawn.Ref) (dawn.Ref, bool) {
 	for _, r := range inputs {
-		if r.Kind == aw.KindWorkspace {
+		if r.Kind == dawn.KindWorkspace {
 			return r, true
 		}
 	}
-	return aw.Ref{}, false
+	return dawn.Ref{}, false
 }
 
 // CapturesTree marks Workspace as able to honor Invocation.Expect.
 func (Workspace) CapturesTree() {}
 
 var (
-	_ aw.Backend      = Workspace{}
-	_ aw.TreeCapturer = Workspace{}
+	_ dawn.Backend      = Workspace{}
+	_ dawn.TreeCapturer = Workspace{}
 )

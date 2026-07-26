@@ -1,7 +1,7 @@
 // Package store is aw's commit layer: content-addressed bytes. Put returns a
 // stable ref; Get round-trips it. Because a ref is the hash of its content,
 // "resume" for the linear case is nothing more than re-reading committed refs —
-// which is why aw has no separate resume engine.
+// which is why dawn has no separate resume engine.
 //
 // [Blobs] is the seam. [Mem] is the in-memory implementation used by tests and
 // the demo; a filesystem or object-store implementation slots in behind the

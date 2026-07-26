@@ -5,8 +5,8 @@
 # tree `fix` PRODUCED — not a shared mutable directory — so it builds on the
 # accepted fix and nothing else.
 #
-#   aw run  examples/repo.yaml --in examples/calc
-#   aw show examples/repo.yaml test.workspace | tar -x -C out/
+#   dawn run  examples/repo.yaml --in examples/calc
+#   dawn show examples/repo.yaml test.workspace | tar -x -C out/
 #
 # examples/calc is only ever READ. Each step edits a scratch copy, and what
 # survives is a content-addressed tree ref.

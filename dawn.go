@@ -1,16 +1,16 @@
-// Package aw is a lean runtime for gluing agent invocations together behind an
+// Package dawn is a lean runtime for gluing agent invocations together behind an
 // independent acceptance gate. The whole core is three ideas: an [Invocation],
 // a [Result], and a [Backend] that turns one into the other. Everything else in
-// this module — the jury ([github.com/valbaudo/aw/gate]), the store
-// ([github.com/valbaudo/aw/store]), a concrete backend
-// ([github.com/valbaudo/aw/backend/claude]) — is a thin layer over these types
+// this module — the jury ([github.com/valbaudo/dawn/gate]), the store
+// ([github.com/valbaudo/dawn/store]), a concrete backend
+// ([github.com/valbaudo/dawn/backend/claude]) — is a thin layer over these types
 // and depends only on this package. Nothing depends the other way.
 //
 // What is deliberately ABSENT from [Invocation] is the point: no node paths, no
 // gate feedback, no attempt counters, no session/config-dir plumbing, no
 // workflow directory. Those are orchestration concerns and live in whatever
-// drives aw (a for-loop, a plan runner, Temporal), never in the call itself.
-package aw
+// drives dawn (a for-loop, a plan runner, Temporal), never in the call itself.
+package dawn
 
 import "context"
 
@@ -26,7 +26,7 @@ const (
 )
 
 // Ref is a content-addressed reference to a piece of state. The bytes live in a
-// store ([github.com/valbaudo/aw/store]); a Ref carries identity, not payload,
+// store ([github.com/valbaudo/dawn/store]); a Ref carries identity, not payload,
 // so it is cheap to pass between invocations and durable across a crash.
 type Ref struct {
 	Kind  Kind   `json:"kind"`

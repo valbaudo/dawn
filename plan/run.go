@@ -9,17 +9,17 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/valbaudo/aw"
-	"github.com/valbaudo/aw/gate"
-	"github.com/valbaudo/aw/store"
+	"github.com/valbaudo/dawn"
+	"github.com/valbaudo/dawn/gate"
+	"github.com/valbaudo/dawn/store"
 )
 
 // StepResult is a committed step: its typed output, any state refs it produced,
 // and the store ref that record was content-addressed to.
 type StepResult struct {
 	Output   map[string]any
-	Produced map[string]aw.Ref
-	Tokens   aw.Tokens
+	Produced map[string]dawn.Ref
+	Tokens   dawn.Tokens
 	Ref      string
 }
 
@@ -27,8 +27,8 @@ type StepResult struct {
 // can still hand a workspace ref to the next step; committing only the scalars
 // would silently break the chain.
 type stepBlob struct {
-	Output   map[string]any    `json:"output"`
-	Produced map[string]aw.Ref `json:"produced,omitempty"`
+	Output   map[string]any      `json:"output"`
+	Produced map[string]dawn.Ref `json:"produced,omitempty"`
 }
 
 // RejectedError is a panel refusing the work — a legitimate outcome, not a
@@ -45,14 +45,14 @@ func (e *RejectedError) Error() string {
 	return fmt.Sprintf("gate refused after %d attempt(s): %s", e.Attempts, e.Objections)
 }
 
-// Runner executes a Plan. Backend maps an agent spec to a concrete aw.Backend, so
+// Runner executes a Plan. Backend maps an agent spec to a concrete dawn.Backend, so
 // the runner stays backend-agnostic.
 type Runner struct {
 	Blobs   store.Blobs
 	Journal *Journal        // optional; nil means never reuse and never record
 	Redo    map[string]bool // step ids to re-run even on a hit, this run only
-	Root    *aw.Ref         // optional: the tree bound by --in, referenced as in.workspace
-	Backend func(Agent) (aw.Backend, error)
+	Root    *dawn.Ref       // optional: the tree bound by --in, referenced as in.workspace
+	Backend func(Agent) (dawn.Backend, error)
 	Log     func(format string, args ...any)
 }
 
@@ -83,7 +83,7 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 		if err != nil {
 			return nil, fmt.Errorf("step %q: %w", id, err)
 		}
-		if _, ok := b.(aw.TreeCapturer); !ok {
+		if _, ok := b.(dawn.TreeCapturer); !ok {
 			return nil, fmt.Errorf("step %q declares expect: but agent %q captures no tree", id, s.Agent)
 		}
 	}
@@ -91,7 +91,7 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 	done := map[string]StepResult{}
 	if r.Root != nil {
 		// The reserved root step: a value in the graph, not a special case in bind.
-		done[RootStep] = StepResult{Produced: map[string]aw.Ref{"workspace": *r.Root}}
+		done[RootStep] = StepResult{Produced: map[string]dawn.Ref{"workspace": *r.Root}}
 	}
 
 	for _, id := range order {
@@ -162,7 +162,7 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 // receives, and the canonical form those inputs take in the identity key.
 type bound struct {
 	prompt string
-	refs   map[string]aw.Ref
+	refs   map[string]dawn.Ref
 	key    map[string]string
 }
 
@@ -175,7 +175,7 @@ type bound struct {
 // and silently defeats every cache hit. Measured before this was sorted: three
 // inputs produced three distinct prompts across repeated runs.
 func (r *Runner) bind(s Step, done map[string]StepResult) (bound, error) {
-	b := bound{prompt: s.Prompt, refs: map[string]aw.Ref{}, key: map[string]string{}}
+	b := bound{prompt: s.Prompt, refs: map[string]dawn.Ref{}, key: map[string]string{}}
 	for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
 		did, field, _ := ParseRef(s.Inputs[name])
 		up := done[did]
@@ -195,7 +195,7 @@ func (r *Runner) bind(s Step, done map[string]StepResult) (bound, error) {
 }
 
 // backendFor constructs the backend named by a step's agent string.
-func (r *Runner) backendFor(s Step) (aw.Backend, error) {
+func (r *Runner) backendFor(s Step) (dawn.Backend, error) {
 	a, err := ParseAgent(s.Agent)
 	if err != nil {
 		return nil, err
@@ -210,9 +210,9 @@ func (r *Runner) execute(ctx context.Context, id string, s Step, b bound) (StepR
 	}
 	// The schema is pushed to the agent as an OPTIMIZATION. It is never the
 	// authority: Step.Validate re-checks locally on every backend, always.
-	inv := aw.Invocation{Prompt: b.prompt, Inputs: b.refs, Schema: s.Schema(), Expect: s.Expect}
+	inv := dawn.Invocation{Prompt: b.prompt, Inputs: b.refs, Schema: s.Schema(), Expect: s.Expect}
 
-	var res aw.Result
+	var res dawn.Result
 	if s.Gate == nil {
 		r.logf("run  %s (%s)", id, backend.Name())
 		res, err = backend.Invoke(ctx, inv)
@@ -231,17 +231,17 @@ func (r *Runner) execute(ctx context.Context, id string, s Step, b bound) (StepR
 // runGated generates, submits the result to an independent panel, and repairs
 // from the critique until quorum or the attempt bound. A gate that never reaches
 // quorum fails the step rather than passing the work through.
-func (r *Runner) runGated(ctx context.Context, id string, s Step, backend aw.Backend, inv aw.Invocation) (aw.Result, error) {
+func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.Backend, inv dawn.Invocation) (dawn.Result, error) {
 	g := s.Gate
-	judges := make([]aw.Backend, 0, len(g.Judges))
+	judges := make([]dawn.Backend, 0, len(g.Judges))
 	for _, spec := range g.Judges {
 		a, err := ParseAgent(spec)
 		if err != nil {
-			return aw.Result{}, err
+			return dawn.Result{}, err
 		}
 		b, err := r.Backend(a)
 		if err != nil {
-			return aw.Result{}, err
+			return dawn.Result{}, err
 		}
 		judges = append(judges, b)
 	}
@@ -255,7 +255,7 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend aw.Bac
 	// pass and the caller errors on non-approval — i.e. it is a landmine: the day
 	// anything returns a last candidate on non-approval, an UNJUDGED result would
 	// ship under an accepted key.
-	var generated []aw.Result
+	var generated []dawn.Result
 	gen := func(ctx context.Context, feedback string) (gate.Candidate, error) {
 		attempt := inv
 		if feedback != "" {
@@ -285,15 +285,15 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend aw.Bac
 
 	out, err := gate.Gate(ctx, gen, judges, g.Criteria, quorum, Attempts)
 	if err != nil {
-		return aw.Result{}, err
+		return dawn.Result{}, err
 	}
 	if !out.Approved {
-		return aw.Result{}, &RejectedError{Step: id, Attempts: out.Attempts, Objections: objections(out.Votes)}
+		return dawn.Result{}, &RejectedError{Step: id, Attempts: out.Attempts, Objections: objections(out.Votes)}
 	}
 	// Commit the attempt the panel APPROVED, addressed by index — never merely the
 	// last one generated.
 	if out.Attempts < 1 || out.Attempts > len(generated) {
-		return aw.Result{}, fmt.Errorf("gate reported attempt %d of %d generated: refusing to commit an unidentified result",
+		return dawn.Result{}, fmt.Errorf("gate reported attempt %d of %d generated: refusing to commit an unidentified result",
 			out.Attempts, len(generated))
 	}
 	r.logf("     gate passed on attempt %d", out.Attempts)
@@ -346,7 +346,7 @@ func short(ref string) string {
 	return ref
 }
 
-// StepStatus is one row of `aw show PLAN`: what a step would do on the next run.
+// StepStatus is one row of `dawn show PLAN`: what a step would do on the next run.
 type StepStatus struct {
 	ID    string
 	State string // fresh | stale | unknown
@@ -355,8 +355,8 @@ type StepStatus struct {
 }
 
 // Status resolves what the next run would do, WITHOUT executing anything. It is
-// the same identity-resolution walk Run performs, which is the point: `aw run` is
-// `aw show` plus executing the stale frontier, so there is one implementation of
+// the same identity-resolution walk Run performs, which is the point: `dawn run` is
+// `dawn show` plus executing the stale frontier, so there is one implementation of
 // "is this step fresh" rather than a second one inside a --dry-run branch.
 //
 // Honest limit: a step's key depends on its upstream's RESOLVED output, so
@@ -370,7 +370,7 @@ func (r *Runner) Status(p *Plan) ([]StepStatus, error) {
 	}
 	done := map[string]StepResult{}
 	if r.Root != nil {
-		done[RootStep] = StepResult{Produced: map[string]aw.Ref{"workspace": *r.Root}}
+		done[RootStep] = StepResult{Produced: map[string]dawn.Ref{"workspace": *r.Root}}
 	}
 	out := make([]StepStatus, 0, len(order))
 	for _, id := range order {
@@ -418,7 +418,7 @@ func worstCase(s Step) int {
 }
 
 // Committed returns a step's committed record, or false if the next run would
-// re-execute it. Used by `aw show PLAN REF` so reading a result and previewing a
+// re-execute it. Used by `dawn show PLAN REF` so reading a result and previewing a
 // run share one notion of what "already done" means.
 func (r *Runner) Committed(p *Plan, id string) (StepResult, bool, error) {
 	status, err := r.Status(p)

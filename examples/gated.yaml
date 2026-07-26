@@ -6,12 +6,12 @@
 # lets the language refuse if/loop/reduce entirely: a quorum needs counting,
 # repair needs iteration, halting needs a conditional.
 #
-#   aw run examples/gated.yaml
+#   dawn run examples/gated.yaml
 
 steps:
   release_note:
     agent: claude/sonnet
-    prompt: Write a three-sentence release note for a new `aw run --json` flag that streams machine-readable events.
+    prompt: Write a three-sentence release note for a new `dawn run --json` flag that streams machine-readable events.
     outputs:
       text: string
     gate:
@@ -19,5 +19,5 @@ steps:
       quorum: 2 # omit for a majority; ties reject
       criteria: >
         You are a strict, independent reviewer. Approve ONLY if the release note
-        is EXACTLY three sentences AND explicitly names the `aw run --json`
+        is EXACTLY three sentences AND explicitly names the `dawn run --json`
         feature. Be harsh.

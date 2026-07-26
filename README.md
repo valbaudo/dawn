@@ -1,23 +1,25 @@
-# aw
+# dawn
+
+**D**irected **A**gent **W**ork **N**odes.
 
 Glue agent invocations together behind an independent acceptance gate. Lean by design.
 
 The whole core is three ideas: an `Invocation`, a `Result`, and a `Backend` that turns
 one into the other. Everything else is a thin, single-purpose package over those types.
 Two seams vary — `Backend` (how one invocation runs) and `Blobs` (where state commits) —
-and everything else is plain code whose dependency arrows all point at `aw`.
+and everything else is plain code whose dependency arrows all point at `dawn`.
 
 ## Layout
 
 | Path | What | Depends on |
 |------|------|------------|
-| `aw.go` | core types + the `Backend` seam | nothing |
+| `dawn.go` | core types + the `Backend` seam | nothing |
 | `proc/` | child processes whose whole group dies on cancel, so timeouts fire | nothing |
 | `store/` | content-addressed state: `Blobs` for bytes (`Mem`, durable `FS`), `Trees` for directories (git-backed) | `proc` |
-| `gate/` | judge / jury / k-of-N quorum / repair loop — a library, not an engine | `aw` |
-| `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures + materializes a tree | `aw`, `store` |
-| `plan/` | strict static-DAG runner: typed output, no control flow, identity-keyed reuse | `aw`, `store`, `gate`, `yaml.v3` |
-| `cmd/aw/` | `aw run` and `aw show` | all |
+| `gate/` | judge / jury / k-of-N quorum / repair loop — a library, not an engine | `dawn` |
+| `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures + materializes a tree | `dawn`, `store` |
+| `plan/` | strict static-DAG runner: typed output, no control flow, identity-keyed reuse | `dawn`, `store`, `gate`, `yaml.v3` |
+| `cmd/dawn/` | `dawn run` and `dawn show` | all |
 
 Add a backend or a store behind its interface; the core never changes. Resume is not a
 feature and not a flag: a step's identity is a hash of the question it asks (its
@@ -33,16 +35,16 @@ Uses your local Claude Code login (no API key):
 
 ```sh
 go test ./...                                  # deterministic; no network
-go run ./cmd/aw show examples/pipeline.yaml      # what is stale, and the call count
-go run ./cmd/aw run  examples/pipeline.yaml      # run; commits to .aw/
-go run ./cmd/aw run  examples/pipeline.yaml      # again: zero paid work
-go run ./cmd/aw run  examples/pipeline.yaml --redo draft
-go run ./cmd/aw show examples/pipeline.yaml tighten.sentence
-go run ./cmd/aw run  examples/gated.yaml         # a gated step: draft -> 3-model panel -> repair
+go run ./cmd/dawn show examples/pipeline.yaml      # what is stale, and the call count
+go run ./cmd/dawn run  examples/pipeline.yaml      # run; commits to .dawn/
+go run ./cmd/dawn run  examples/pipeline.yaml      # again: zero paid work
+go run ./cmd/dawn run  examples/pipeline.yaml --redo draft
+go run ./cmd/dawn show examples/pipeline.yaml tighten.sentence
+go run ./cmd/dawn run  examples/gated.yaml         # a gated step: draft -> 3-model panel -> repair
 
 # two agents editing a real repo, the tree flowing between them:
-go run ./cmd/aw run  examples/repo.yaml --in examples/calc
-go run ./cmd/aw show examples/repo.yaml test.workspace --in examples/calc | tar -x -C out/
+go run ./cmd/dawn run  examples/repo.yaml --in examples/calc
+go run ./cmd/dawn show examples/repo.yaml test.workspace --in examples/calc | tar -x -C out/
 ```
 
 ## The plan format

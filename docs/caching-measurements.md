@@ -80,7 +80,7 @@ from the system prompt into the first user message"* and its documented purpose
 is to *"improve cross-user prompt-cache reuse"*. It is ignored with
 `--system-prompt`, which is why the two backends take different routes.
 
-Measured through `aw run` itself: two DIFFERENT plan files, in DIFFERENT state
+Measured through `dawn run` itself: two DIFFERENT plan files, in DIFFERENT state
 directories, whose prompts share a ~6k-token leading block and differ only in the
 final line.
 
@@ -95,7 +95,7 @@ the caller's block was re-created on every call.
 
 **Partial, and expected to be.** ~59% of the cold cost came from cache; the rest
 is the span after the last cache breakpoint before the two prompts diverge.
-Breakpoint placement is the provider's, not aw's — which is exactly why aw ships
+Breakpoint placement is the provider's, not dawn's — which is exactly why dawn ships
 ordering discipline plus the measurement, and no knob.
 
 ## What this means

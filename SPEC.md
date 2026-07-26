@@ -1,4 +1,6 @@
-# The aw plan language
+# The dawn plan language
+
+*dawn — Directed Agent Work Nodes.*
 
 **Status: implemented.** See [Delta](#delta) for the few gaps that remain.
 
@@ -146,7 +148,7 @@ a ~6k-token prefix, `cache_read` 0 → **17,929**.
 override, so `codex exec resume` is the only handle. That lives in the adapter, not the
 plan.
 
-**No `cache:` knob.** aw owns ordering and reports `cache_read`/`cache_create` per step
+**No `cache:` knob.** dawn owns ordering and reports `cache_read`/`cache_create` per step
 in the journal. One measurement, no knob — falsifiable, which a knob is not.
 
 ---
@@ -178,7 +180,7 @@ A non-conforming candidate never reaches a judge. Neither does a step that faile
 produce a declared path.
 
 A **schema violation** is a third thing: not a crash (the process exited 0), not a
-verdict (no judge ran). The step fails; the retry is `aw run` again, which re-pays one
+verdict (no judge ran). The step fails; the retry is `dawn run` again, which re-pays one
 step rather than the run.
 
 ---
@@ -186,7 +188,7 @@ step rather than the run.
 ## 4 · Artifacts
 
 The tree is the only artifact channel, and **producer path equals consumer path** —
-`dist/aw` written by `build` is read at `dist/aw` by `smoke`. Every tree-capturing step
+`dist/dawn` written by `build` is read at `dist/dawn` by `smoke`. Every tree-capturing step
 gets its own scratch dir: materialize inputs → run → capture → discard. The host
 filesystem is never touched.
 
@@ -197,7 +199,7 @@ git add -A                  # everything; .gitignore honored
 git add -f -- <expect…>     # forced past .gitignore, and errors if never produced
 ```
 
-Verified: with `dist/` ignored, plain `add -A` yields a tree where `dist/aw`
+Verified: with `dist/` ignored, plain `add -A` yields a tree where `dist/dawn`
 **does not exist** — the flagship artifact silently absent.
 
 **A missed `expect:` path is a rejection, not a crash.** Under a gate it feeds repair
@@ -215,7 +217,7 @@ the file whose bytes are the plan's identity.
 
 ## 5 · Rewind and redo
 
-**Resume is deleted as a concept.** `aw run` computes each key in topological order and
+**Resume is deleted as a concept.** `dawn run` computes each key in topological order and
 skips what the journal already holds. Re-running *is* the resume — one code path,
 exercised every run rather than only after a crash.
 
@@ -280,15 +282,15 @@ quorum. Its fan-in rule is fixed, which is exactly why it can be data.
 ## The CLI
 
 ```
-aw run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]…
-aw show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]…
+dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]…
+dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]…
 
 REF ::= <step>[.<field>]     the plan's own grammar, same code path as a load-time check
 ```
 
 Both commands take all three flags; there is no flag legal on one and not the other.
 
-**`aw show PLAN` with no REF is the dry run**: per-step fresh/stale plus the worst-case
+**`dawn show PLAN` with no REF is the dry run**: per-step fresh/stale plus the worst-case
 bill. `--dry-run` is deleted because "a mode of run that does not run" always grows a
 second identity-resolution path inside `run`; this way `run` *is* `show` plus executing
 the stale frontier. `--redo` works on `show`, which is what makes "what would forcing
@@ -299,7 +301,7 @@ Two honest limits on the preview: the bill is exact in **calls** but a range in 
 `unknown` rather than `stale`, because a step's key depends on its upstream's resolved
 output.
 
-**`aw show PLAN REF` writes to stdout** — `aw show p.yaml fix.workspace | tar -x -C out/`.
+**`dawn show PLAN REF` writes to stdout** — `dawn show p.yaml fix.workspace | tar -x -C out/`.
 No `--into`, because `--into` is the first flag of a family ending in
 `--strip-components`, `--only`, `--list`: tar, reimplemented badly.
 
@@ -347,11 +349,11 @@ steps:
 ```
 
 ```sh
-aw show plan.yaml --in ~/src/csvtool          # what is stale, and the call count
-aw run  plan.yaml --in ~/src/csvtool          # run; re-run == resume
-aw run  plan.yaml --in ~/src/csvtool --redo fix
-aw show plan.yaml note.line                   # read a committed value
-aw show plan.yaml fix.workspace | tar -x -C out/
+dawn show plan.yaml --in ~/src/csvtool          # what is stale, and the call count
+dawn run  plan.yaml --in ~/src/csvtool          # run; re-run == resume
+dawn run  plan.yaml --in ~/src/csvtool --redo fix
+dawn show plan.yaml note.line                   # read a committed value
+dawn show plan.yaml fix.workspace | tar -x -C out/
 ```
 
 ---
@@ -399,15 +401,15 @@ and a posture that dangerous should be a word an author typed.
    manual of worked criteria, not a feature.
 3. **Sequential execution.** The jury is the only concurrency. Right for a first version;
    revisit `--jobs` with a measured number when a real plan is slow.
-4. **`--in` is required for `aw show PLAN`** (pricing needs the input digest) but optional
-   for `aw show PLAN REF` (reading a committed artifact must not need live host state).
+4. **`--in` is required for `dawn show PLAN`** (pricing needs the input digest) but optional
+   for `dawn show PLAN REF` (reading a committed artifact must not need live host state).
    Documented rather than papered over.
 
 ---
 
 ## Delta
 
-The code implements this spec. `aw run` and `aw show` work end to end: typed
+The code implements this spec. `dawn run` and `dawn show` work end to end: typed
 outputs with load-time reference checking, inputs resolved by kind, `expect:`,
 gates with quorum and bounded repair, the identity key, the append-only journal,
 `--redo`, `--in`, per-step scratch dirs, tree capture and materialize, stable
@@ -417,7 +419,7 @@ Not yet: more backends than `claude` and `claude-ws` (codex, an HTTP LLM), and
 concurrency beyond the jury. Both slot behind existing seams.
 
 Honest gaps in what is built, none of them language-level:
-- `aw show PLAN` prices a run in **calls**, not dollars, and everything past the
+- `dawn show PLAN` prices a run in **calls**, not dollars, and everything past the
   first stale step reads `unknown` — a step's key depends on its upstream's
   resolved output, which is the price of early cutoff.
 - The 128KB evidence cap and the diff rendering a binary as one sentence are

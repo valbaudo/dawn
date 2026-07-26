@@ -1,7 +1,7 @@
 // Package gate is aw's differentiator, kept deliberately as a LIBRARY, not an
 // engine primitive: an independent acceptance check over any set of
-// [aw.Backend]s. A single judge is [Judge]; N judges with a k-of-N quorum is
-// [Jury]. Both are a fan-out of independent [aw.Backend.Invoke] calls plus a
+// [dawn.Backend]s. A single judge is [Judge]; N judges with a k-of-N quorum is
+// [Jury]. Both are a fan-out of independent [dawn.Backend.Invoke] calls plus a
 // count — no runtime privileges, no shared state, no journal ownership. The
 // spike proved this needs zero engine support, and this file is that proof.
 //
@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/valbaudo/aw"
+	"github.com/valbaudo/dawn"
 )
 
 // verdictSchema is the typed contract every judge must return. Typed, not free
@@ -45,8 +45,8 @@ func Majority(n int) int { return n/2 + 1 }
 
 // Judge runs one evaluator over candidate and returns its typed verdict. It is
 // Jury with a single judge; use it when one evaluator is enough.
-func Judge(ctx context.Context, judge aw.Backend, system, candidate string) Verdict {
-	res, err := judge.Invoke(ctx, aw.Invocation{
+func Judge(ctx context.Context, judge dawn.Backend, system, candidate string) Verdict {
+	res, err := judge.Invoke(ctx, dawn.Invocation{
 		System: system,
 		Prompt: candidate,
 		Schema: verdictSchema,
@@ -75,12 +75,12 @@ func Judge(ctx context.Context, judge aw.Backend, system, candidate string) Verd
 // Jury runs each judge independently and concurrently over the same candidate
 // and returns whether approvals reached quorum, along with every vote. Votes are
 // returned in judge order; an errored judge is a non-approval, never a panic.
-func Jury(ctx context.Context, judges []aw.Backend, system, candidate string, quorum int) (approved bool, votes []Verdict) {
+func Jury(ctx context.Context, judges []dawn.Backend, system, candidate string, quorum int) (approved bool, votes []Verdict) {
 	votes = make([]Verdict, len(judges))
 	var wg sync.WaitGroup
 	for i, j := range judges {
 		wg.Add(1)
-		go func(i int, j aw.Backend) {
+		go func(i int, j dawn.Backend) {
 			defer wg.Done()
 			votes[i] = Judge(ctx, j, system, candidate)
 		}(i, j)

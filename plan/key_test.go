@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/valbaudo/aw"
+	"github.com/valbaudo/dawn"
 )
 
 var agentX = Agent{Backend: "claude", Model: "sonnet"}
@@ -150,7 +150,7 @@ func twoStepPlan(secondPrompt string) *Plan {
 func TestReRunningSkipsCommittedSteps(t *testing.T) {
 	dir := t.TempDir()
 	var calls int
-	mk := func() *Runner { return durable(t, dir, byModel(map[string]aw.Backend{"echo": echo{&calls}})) }
+	mk := func() *Runner { return durable(t, dir, byModel(map[string]dawn.Backend{"echo": echo{&calls}})) }
 
 	if _, err := mk().Run(context.Background(), twoStepPlan("two")); err != nil {
 		t.Fatal(err)
@@ -170,7 +170,7 @@ func TestReRunningSkipsCommittedSteps(t *testing.T) {
 func TestEditingAPromptRerunsOnlyThatStep(t *testing.T) {
 	dir := t.TempDir()
 	var calls int
-	mk := func() *Runner { return durable(t, dir, byModel(map[string]aw.Backend{"echo": echo{&calls}})) }
+	mk := func() *Runner { return durable(t, dir, byModel(map[string]dawn.Backend{"echo": echo{&calls}})) }
 
 	if _, err := mk().Run(context.Background(), twoStepPlan("two")); err != nil {
 		t.Fatal(err)
@@ -188,11 +188,11 @@ func TestRedoForcesAStep(t *testing.T) {
 	dir := t.TempDir()
 	var calls int
 	p := twoStepPlan("two")
-	if _, err := durable(t, dir, byModel(map[string]aw.Backend{"echo": echo{&calls}})).Run(context.Background(), p); err != nil {
+	if _, err := durable(t, dir, byModel(map[string]dawn.Backend{"echo": echo{&calls}})).Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	calls = 0
-	r := durable(t, dir, byModel(map[string]aw.Backend{"echo": echo{&calls}}))
+	r := durable(t, dir, byModel(map[string]dawn.Backend{"echo": echo{&calls}}))
 	r.Redo = map[string]bool{"first": true}
 	if _, err := r.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
@@ -208,7 +208,7 @@ func TestRedoForcesAStep(t *testing.T) {
 func TestProducedRefsSurviveACommit(t *testing.T) {
 	dir := t.TempDir()
 	p := &Plan{Steps: map[string]Step{"first": {Agent: "x/gen", Prompt: "make it", Outputs: map[string]Type{"text": {}}}}}
-	mk := func() *Runner { return durable(t, dir, byModel(map[string]aw.Backend{"gen": producer{}})) }
+	mk := func() *Runner { return durable(t, dir, byModel(map[string]dawn.Backend{"gen": producer{}})) }
 	if _, err := mk().Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestStatusReportsFreshStaleUnknown(t *testing.T) {
 	dir := t.TempDir()
 	var calls int
 	p := twoStepPlan("two")
-	mk := func() *Runner { return durable(t, dir, byModel(map[string]aw.Backend{"echo": echo{&calls}})) }
+	mk := func() *Runner { return durable(t, dir, byModel(map[string]dawn.Backend{"echo": echo{&calls}})) }
 
 	st, err := mk().Status(p)
 	if err != nil {

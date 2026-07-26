@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/valbaudo/aw/proc"
+	"github.com/valbaudo/dawn/proc"
 )
 
 // EmptyTree is git's well-known sha for the empty tree. Diff from it to see a
@@ -60,7 +60,7 @@ func NewTrees(dir string) (*Trees, error) {
 // so a declared artifact under an ignored directory (dist/, build/, target/ — the
 // normal case) would be silently absent from the captured tree; and `git add -f`
 // fails loudly on a path that was never produced. Verified: with `dist/` ignored,
-// plain `add -A` yields a tree where dist/aw does not exist, while
+// plain `add -A` yields a tree where dist/dawn does not exist, while
 // `add -f -- dist/aw` includes it and `add -f -- dist/nope` errors.
 func (t *Trees) Capture(ctx context.Context, workDir string, must ...string) (string, error) {
 	idx, done, err := t.tempIndex()
@@ -162,8 +162,8 @@ func git(ctx context.Context, dir string, env []string, args ...string) (string,
 }
 
 // Archive streams a captured tree as a tar to w. This is how a tree leaves aw:
-// `aw show plan.yaml fix.workspace | tar -x -C out/`. Piping rather than an
-// --into flag keeps aw out of the business of reimplementing tar's own
+// `dawn show plan.yaml fix.workspace | tar -x -C out/`. Piping rather than an
+// --into flag keeps dawn out of the business of reimplementing tar's own
 // --strip-components, --only and --list.
 func (t *Trees) Archive(ctx context.Context, tree string, w io.Writer) error {
 	cmd := proc.Command(ctx, "git", "archive", "--format=tar", tree)

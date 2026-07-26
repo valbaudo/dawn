@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/valbaudo/aw"
+	"github.com/valbaudo/dawn"
 )
 
 // Candidate is one generated attempt: the rendering the jury reads, plus any
@@ -14,8 +14,8 @@ import (
 // caller wants back is the artifact that rendering describes. Without them an
 // accepted attempt's workspace would be unrecoverable from the outcome.
 type Candidate struct {
-	Text     string            // what the judges read
-	Produced map[string]aw.Ref // state refs this attempt created, if any
+	Text     string              // what the judges read
+	Produced map[string]dawn.Ref // state refs this attempt created, if any
 }
 
 // Text is a Candidate with no artifacts, for generators that only produce prose.
@@ -23,7 +23,7 @@ func Text(s string) Candidate { return Candidate{Text: s} }
 
 // FromResult builds a Candidate from an invocation, reading the jury's rendering
 // from the named output field and carrying that invocation's produced refs.
-func FromResult(res aw.Result, field string) Candidate {
+func FromResult(res dawn.Result, field string) Candidate {
 	s, _ := res.Output[field].(string)
 	return Candidate{Text: s, Produced: res.Produced}
 }
@@ -53,7 +53,7 @@ type Outcome struct {
 // evaluation (any judge's Invoke erroring) returns a non-nil error and does NOT
 // count as a rejection or consume the attempt budget. Only a clean evaluation
 // whose verdict is "reject" spends an attempt and triggers repair.
-func Gate(ctx context.Context, gen Generate, judges []aw.Backend, system string, quorum, maxAttempts int) (Outcome, error) {
+func Gate(ctx context.Context, gen Generate, judges []dawn.Backend, system string, quorum, maxAttempts int) (Outcome, error) {
 	var out Outcome
 	feedback := ""
 	for attempt := 1; attempt <= maxAttempts; attempt++ {

@@ -1,7 +1,7 @@
-// Command aw runs and inspects agent plans.
+// Command dawn runs and inspects agent plans.
 //
-//	aw run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]…
-//	aw show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]…
+//	dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]…
+//	dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]…
 //
 // `run` executes the plan's steps in dependency order, committing each step's
 // typed output against its identity key. Re-running IS resuming: a step whose key
@@ -13,7 +13,7 @@
 // is show plus executing the stale frontier.
 //
 // `show PLAN <step>.<field>` prints a committed value, and a workspace field
-// streams as a tar: `aw show p.yaml fix.workspace | tar -x -C out/`.
+// streams as a tar: `dawn show p.yaml fix.workspace | tar -x -C out/`.
 package main
 
 import (
@@ -26,10 +26,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/valbaudo/aw"
-	"github.com/valbaudo/aw/backend/claude"
-	"github.com/valbaudo/aw/plan"
-	"github.com/valbaudo/aw/store"
+	"github.com/valbaudo/dawn"
+	"github.com/valbaudo/dawn/backend/claude"
+	"github.com/valbaudo/dawn/plan"
+	"github.com/valbaudo/dawn/store"
 )
 
 // Exit codes. Unattended means something reads $?, and the distinction nothing
@@ -70,8 +70,8 @@ func usagef(format string, a ...any) error { return &usageError{fmt.Errorf(forma
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:\n"+
-		"  aw run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]...\n"+
-		"  aw show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]...")
+		"  dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]...\n"+
+		"  dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]...")
 	os.Exit(exitUsage)
 }
 
@@ -83,7 +83,7 @@ func die(code int, err error) {
 func execute(cmd string, args []string) error {
 	positional, flags := split(args)
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	dir := fs.String("dir", ".aw", "state directory: blobs/, trees/ and journal.jsonl")
+	dir := fs.String("dir", ".dawn", "state directory: blobs/, trees/ and journal.jsonl")
 	in := fs.String("in", "", "host directory bound to the reserved step `in`")
 	var redo repeated
 	fs.Var(&redo, "redo", "step to re-run even if committed (repeatable)")
@@ -122,7 +122,7 @@ func execute(cmd string, args []string) error {
 		if err != nil {
 			return fmt.Errorf("--in %s: %w", *in, err)
 		}
-		r.Root = &aw.Ref{Kind: aw.KindWorkspace, URI: tree, Media: "application/vnd.git-tree"}
+		r.Root = &dawn.Ref{Kind: dawn.KindWorkspace, URI: tree, Media: "application/vnd.git-tree"}
 	}
 
 	if cmd == "show" {
@@ -189,7 +189,7 @@ func showRef(ctx context.Context, r *plan.Runner, p *plan.Plan, trees *store.Tre
 		return fmt.Errorf("step %q has no committed result for the current plan; run it first", id)
 	}
 	if produced, isRef := rec.Produced[field]; isRef {
-		if produced.Kind != aw.KindWorkspace {
+		if produced.Kind != dawn.KindWorkspace {
 			return fmt.Errorf("%s is a %s ref, which has no byte form to print", ref, produced.Kind)
 		}
 		return trees.Archive(ctx, produced.URI, os.Stdout)
@@ -205,8 +205,8 @@ func showRef(ctx context.Context, r *plan.Runner, p *plan.Plan, trees *store.Tre
 // backends maps an agent spec to a concrete backend. `claude` is a prompt-to-JSON
 // call; `claude-ws` edits files, which is a privilege posture and therefore a word
 // the author typed rather than something inferred from a value.
-func backends(trees *store.Trees) func(plan.Agent) (aw.Backend, error) {
-	return func(a plan.Agent) (aw.Backend, error) {
+func backends(trees *store.Trees) func(plan.Agent) (dawn.Backend, error) {
+	return func(a plan.Agent) (dawn.Backend, error) {
 		switch a.Backend {
 		case "claude":
 			return claude.Backend{Model: a.Model}, nil
