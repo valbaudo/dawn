@@ -279,6 +279,69 @@ quorum. Its fan-in rule is fixed, which is exactly why it can be data.
 
 ---
 
+## 8 · Isolation
+
+Two agents editing at once must not touch each other's files. That is the whole
+requirement: **mutual non-interference, not containment.** An agent that writes an
+absolute path outside its directory is not prevented and is not meant to be. The threat
+model is *two of my own steps trip over each other*, never *this step is hostile*.
+
+**The mechanism is a distinct path, and dawn already has one.** Every invocation of a
+tree-capturing step gets a fresh `os.MkdirTemp` — mode 0700, random suffix — materialized
+from an immutable tree, used as the agent's working directory, and deleted on return.
+Per invocation, so per gate attempt. Two steps cannot collide on a path neither can name.
+
+> **Isolation is allocation, not enforcement.** Disjoint paths *are* non-interference. A
+> kernel policy enforcing a property the allocator already guarantees buys nothing.
+
+Nothing mutable is shared: inputs are content-addressed trees, the git index is a fresh
+temp file per capture, blobs are fsync-then-rename, the journal is one `O_APPEND` line.
+This is strictly stronger than the 2026 consensus primitive. A `git worktree` shares the
+parent `.git`; git is a single writer, and concurrent agents lose work to `index.lock`.
+dawn shares no index, no refs, no working tree — only an immutable object store.
+
+**`cmd.Dir` is also the entire caller-side sandbox API.** Every agent CLI that confines
+writes anchors that confinement on the process working directory — claude on cwd, codex
+on `--cd`, droid on CWD, cursor on the workspace. There is no *declare my workspace* call
+to make. Where an operator has enabled their CLI's own sandbox, dawn opts into it for
+free; where they have not, dawn does not pretend otherwise.
+
+**What an author writes: nothing.** There is no isolation key and no flag. The one
+language consequence is a refusal that makes an existing promise true: **two `workspace`
+inputs on one step is a load error.** The workspace input *is* the working directory, so
+a second makes the cwd a coin flip — measured 173/27 over 200 resolutions, a skew that
+passes every hand test and flips overnight.
+
+**Platform.** Identical on macOS and Linux. No build tags, no syscalls, no fallback
+branch, because there is nothing to fall back from. Scratch lands under `$TMPDIR`; where
+`/tmp` is tmpfs, set `TMPDIR` to keep a large tree out of RAM. A run killed with
+`SIGKILL` leaks its scratch dir, and `rm -rf "$TMPDIR"/dawn-ws-*` is the cleanup.
+
+**Not guaranteed, plainly.** Escape is possible and needs no exploit. dawn passes
+`--dangerously-skip-permissions`; an absolute path, a `cd ..`, or any spawned subprocess
+writes wherever the uid can. No sandbox dawn could add would change that: an agent CLI's
+own file-edit tools are documented as bypassing its own sandbox, and its model is
+instructed to retry a blocked command with the sandbox disabled. Two further gaps are
+named rather than papered over: an **absolute symlink** captured into a tree is
+re-materialized into every downstream workspace and is writable through it; and ambient
+state outside the workspace — `~/.claude`, `~/.npm`, `~/.cargo`, ports — is shared by
+every step. Neither is a filesystem-isolation problem and neither has an
+isolation-shaped fix.
+
+### Refused
+
+| refused | why |
+|---|---|
+| Seatbelt / bubblewrap / Landlock wrapper | containment, not the requirement. Measured: Seatbelt does not nest — a second profile is denied `sandbox_apply: Operation not permitted` even when strictly stricter, while a byte-identical one succeeds. Wrapping a CLI that sandboxes itself makes it *less* isolated |
+| the writable-path allowlist such a sandbox needs | it must include `$TMPDIR` for the CLI to run at all, and every workspace is a direct child of `$TMPDIR` — so the profile permits exactly the sibling writes it exists to deny |
+| `git worktree` | the consensus choice, and wrong here: it needs a shared mutable `.git`, puts a writable handle to the store inside the agent's cwd, and costs a full checkout. dawn's store is bare and its scratch is disposable |
+| hardlink trees / reflink / clonefile / overlayfs | copy is ~0.1% of a step's 30m bound, so there is nothing to optimize; each is one platform only, or a second dependency. Hardlinks additionally corrupt the original through the link |
+| containers | out of scope: single host, single static binary |
+| per-step `$HOME` / `CLAUDE_CONFIG_DIR` | the one genuinely uncovered vector, and it is env vars rather than a sandbox. Deferred with concurrency: relocating `HOME` logs the agent out, because that is where its credentials live |
+| `confine:` `sandbox:` `dir:` keys | a plan key whose meaning depends on the host OS and kernel version. `--in DIR` already keeps host paths out of the plan's identity |
+
+---
+
 ## The CLI
 
 ```
@@ -316,10 +379,10 @@ the mechanism and a 5s wait on inherited pipes is the backstop, so there is no
 second-signal force-quit to get wrong.
 
 An interrupt is **not a verdict**. Cancelling mid-gate cancels every judge at once, which
-by vote count is indistinguishable from a unanimous no; the judges' errors make the round
-mechanical, so an interrupt never records a rejection and never spends a repair attempt.
-It exits `130` even though the underlying error is mechanical, because *the operator
-stopped it* and *the machine broke* are different facts.
+is indistinguishable from a unanimous no by vote count alone; the judges' errors make the
+round mechanical, so an interrupt never records a rejection and never spends a repair
+attempt. It exits `130` even though the underlying error is mechanical, because *the
+operator stopped it* and *the machine broke* are different facts.
 
 ---
 
