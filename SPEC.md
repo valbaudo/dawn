@@ -218,6 +218,16 @@ a baseline is a starting point, not a floor.
 with "you did not produce X" and consumes an attempt at **zero judge tokens**; ungated,
 it fails the step. Every other capture error stays mechanical.
 
+**An embedded git repository fails the capture.** A directory carrying its own `.git` — a
+vendored dependency, a clone the agent made — is recorded by git as a *commit reference*,
+not files, and that commit lives in the nested repo rather than dawn's store. Reproduced:
+a tree holding `160000 commit 5f9bf40b… vendor/lib` materialized as `[main.go]`, with
+`vendor/lib` not empty but **absent**, and no error anywhere. Refused rather than
+repaired, because git will not descend into an embedded repo and capturing its `HEAD`
+instead would silently substitute its last commit for its working state. A tree that
+cannot round-trip is not a workspace. Ignore the path, or remove the nested `.git`; a
+nested repo under an already-ignored path was never staged and is not affected.
+
 **Every captured tree is pinned behind a ref.** `git write-tree` writes objects that
 nothing points at, so a store with no refs is one where every committed workspace is
 unreachable garbage by git's own definition — `git gc --prune=now` inside `.dawn/trees`

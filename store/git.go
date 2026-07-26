@@ -104,6 +104,9 @@ func (t *Trees) CaptureFrom(ctx context.Context, workDir, base string, must ...s
 			return "", fmt.Errorf("store: declared path missing from %s: %w: %s", workDir, err, strings.TrimSpace(out))
 		}
 	}
+	if err := t.refuseGitlinks(ctx, workDir, env); err != nil {
+		return "", err
+	}
 	out, err := git(ctx, workDir, env, "write-tree")
 	if err != nil {
 		return "", fmt.Errorf("store: write-tree %s: %w: %s", workDir, err, out)
@@ -113,6 +116,59 @@ func (t *Trees) CaptureFrom(ctx context.Context, workDir, base string, must ...s
 		return "", err
 	}
 	return tree, nil
+}
+
+// refuseGitlinks fails a capture that staged an embedded git repository.
+//
+// A directory containing its own .git — a vendored dependency, a clone the agent
+// made, a leftover checkout — is recorded by `git add -A` as mode 160000, a
+// COMMIT reference rather than files. That commit lives in the nested repo's
+// object store, not in dawn's, so the reference dangles the moment the scratch
+// dir is deleted. Reproduced: a tree holding `160000 commit 5f9bf40b… vendor/lib`
+// materialized as `[main.go]` — vendor/lib was not empty, it was absent, and
+// every file under it was gone with no error anywhere.
+//
+// Refused rather than repaired, because git offers no way to descend into an
+// embedded repo: `add -A` skips it, and naming a path inside it fails with
+// "Pathspec is in submodule". Capturing the nested repo's HEAD tree instead would
+// silently substitute its last commit for its working state. A tree that cannot
+// round-trip is not a workspace, so this is a hard error at capture — before a
+// judge is paid, and long before someone opens an empty directory.
+//
+// The check reads the index rather than walking for .git directories, which
+// costs a listing proportional to the file count but is exact: a nested repo
+// under an ignored path was never staged, and so is correctly not a problem.
+func (t *Trees) refuseGitlinks(ctx context.Context, workDir string, env []string) error {
+	out, err := git(ctx, workDir, env, "ls-files", "-s")
+	if err != nil {
+		return fmt.Errorf("store: read index for %s: %w: %s", workDir, err, out)
+	}
+	var found []string
+	for _, line := range strings.Split(out, "\n") {
+		// <mode> <sha> <stage>\t<path>, and 160000 is the gitlink mode.
+		rest, ok := strings.CutPrefix(line, "160000 ")
+		if !ok {
+			continue
+		}
+		if _, path, ok := strings.Cut(rest, "\t"); ok {
+			found = append(found, path)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	shown := found
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	more := ""
+	if len(found) > len(shown) {
+		more = fmt.Sprintf(" (and %d more)", len(found)-len(shown))
+	}
+	return fmt.Errorf("store: %s contains an embedded git repository: %s%s. "+
+		"git records it as a commit reference, not files, and that commit is not in dawn's store, "+
+		"so the directory would come back EMPTY. Remove the nested .git, or ignore the path",
+		workDir, strings.Join(shown, ", "), more)
 }
 
 // pin makes a captured tree reachable, so git's own garbage collector cannot

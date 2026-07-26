@@ -394,3 +394,67 @@ func TestCapturedTreesSurviveGitGC(t *testing.T) {
 		t.Fatalf("a declared artifact must survive gc: %v", err)
 	}
 }
+
+// nestedRepo makes dir a git repository with one committed file.
+func nestedRepo(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-q"}, {"add", "-A"},
+		{"-c", "user.email=a@b.c", "-c", "user.name=x", "commit", "-qm", "init"},
+	} {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("nested repo setup %v: %v: %s", args, err, out)
+		}
+	}
+}
+
+// A directory with its own .git is staged as mode 160000 — a COMMIT reference
+// that lives in the nested repo, not in dawn's store. Reproduced before this
+// check: a tree holding `160000 commit 5f9bf40b… vendor/lib` materialized as
+// [main.go]. vendor/lib was not empty, it was absent, and nothing errored.
+func TestCaptureRefusesAnEmbeddedGitRepo(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	src := t.TempDir()
+	writeFile(t, src, "main.go", "package main\n")
+	writeFile(t, src, "vendor/lib/lib.go", "package lib\n")
+	nestedRepo(t, filepath.Join(src, "vendor", "lib"))
+
+	_, err := tr.Capture(ctx, src)
+	if err == nil {
+		t.Fatal("an embedded git repository must fail the capture, not vanish from the tree")
+	}
+	for _, want := range []string{"embedded git repository", "vendor/lib", "EMPTY"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the error must say what and what to do about it (%q): %v", want, err)
+		}
+	}
+}
+
+// The check must be exact, not a hunt for .git directories: a nested repo under
+// an ignored path was never staged, so it is not a problem and must not become
+// one. This is the node_modules-with-a-clone-in-it case.
+func TestCaptureAllowsAnIgnoredEmbeddedRepo(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	src := t.TempDir()
+	writeFile(t, src, ".gitignore", "node_modules/\n")
+	writeFile(t, src, "main.go", "package main\n")
+	writeFile(t, src, "node_modules/dep/index.js", "module.exports = 1\n")
+	nestedRepo(t, filepath.Join(src, "node_modules", "dep"))
+
+	ref, err := tr.Capture(ctx, src)
+	if err != nil {
+		t.Fatalf("an ignored nested repo was never staged and must not fail the capture: %v", err)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, ref, dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "main.go")); err != nil {
+		t.Fatal("the real content must still be captured")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "node_modules")); !os.IsNotExist(err) {
+		t.Fatal("the ignored directory must stay out of the tree")
+	}
+}
