@@ -2,6 +2,7 @@ package plan
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -176,7 +177,7 @@ func TestCommitsTheApprovedAttemptNotTheLast(t *testing.T) {
 func TestExpectRequiresATreeCapturingBackend(t *testing.T) {
 	var calls int
 	p := &Plan{Steps: map[string]Step{
-		"build": {Agent: "x/echo", Prompt: "build it", Expect: []string{"dist/aw"}},
+		"build": {Agent: "x/echo", Prompt: "build it", Expect: []string{"dist/dawn"}},
 	}}
 	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{"echo": echo{&calls}})}
 	_, err := r.Run(context.Background(), p)
@@ -215,5 +216,51 @@ func TestRootStepSuppliesAWorkspace(t *testing.T) {
 	}
 	if got := seen[0].Inputs["repo"]; got.URI != "tree-root" {
 		t.Fatalf("the root tree must arrive as a ref, got %+v", got)
+	}
+}
+
+// interrupted is a judge that fails the way a real one does when a signal
+// cancels the run out from under it.
+type interrupted struct{ name string }
+
+func (i interrupted) Name() string { return i.name }
+func (i interrupted) Invoke(ctx context.Context, _ dawn.Invocation) (dawn.Result, error) {
+	return dawn.Result{}, ctx.Err()
+}
+
+// An interrupt is not a verdict.
+//
+// SIGTERM cancels every in-flight judge at once, so a cancelled gate looks
+// exactly like a unanimous no: zero approvals. Counting that as a rejection
+// would write a permanent "the panel refused" into the journal for work no judge
+// ever read, and burn the repair budget on it. Cancellation must stay mechanical.
+func TestInterruptDuringGateIsNotARejection(t *testing.T) {
+	j, err := OpenJournal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the signal landed before the panel could vote
+
+	r := &Runner{Blobs: store.NewMem(), Journal: j, Backend: panel(map[string]dawn.Backend{
+		"a": interrupted{"a"}, "b": interrupted{"b"}, "c": interrupted{"c"},
+	})}
+	_, err = r.Run(ctx, gated(&Gate{Judges: []string{"x/a", "x/b", "x/c"}, Criteria: "be good"}))
+	if err == nil {
+		t.Fatal("a cancelled run must fail")
+	}
+	var rej *RejectedError
+	if errors.As(err, &rej) {
+		t.Fatalf("cancellation reported as a rejection: %v", err)
+	}
+
+	entries, err := j.Entries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Rejected != "" {
+			t.Fatalf("cancellation wrote a rejection to the journal: %q", e.Rejected)
+		}
 	}
 }

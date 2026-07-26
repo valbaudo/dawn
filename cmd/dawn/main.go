@@ -22,9 +22,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/valbaudo/dawn"
 	"github.com/valbaudo/dawn/backend/claude"
@@ -36,9 +38,10 @@ import (
 // else in this ecosystem gives you is "the panel refused" versus "the machine
 // broke".
 const (
-	exitRefused    = 1
-	exitUsage      = 2
-	exitMechanical = 3
+	exitRefused     = 1
+	exitUsage       = 2
+	exitMechanical  = 3
+	exitInterrupted = 130
 )
 
 func main() {
@@ -48,19 +51,50 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	switch cmd {
 	case "run", "show":
-		if err := execute(cmd, args); err != nil {
-			var rej *plan.RejectedError
-			if errors.As(err, &rej) {
-				die(exitRefused, err)
+		// A scheduler's SIGTERM and an operator's Ctrl-C both cancel ctx, and
+		// proc.Command turns cancellation into a process-group kill: the agent CLI
+		// and the tool subprocesses it spawned die with the run instead of outliving
+		// it. Unattended, an orphaned agent CLI keeps burning tokens against a run
+		// nobody is waiting for.
+		//
+		// No second-signal force-quit: shutdown is already bounded by
+		// proc.WaitDelay per child and the DAG is sequential, so there is at most
+		// one group to reap.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := execute(ctx, cmd, args); err != nil {
+			code := exitCode(ctx.Err() != nil, err)
+			if code == exitInterrupted {
+				// The reaped child reports "signal: killed", which reads like a crash
+				// in a log nobody watched. Name what happened, keeping the step that
+				// was in flight.
+				err = fmt.Errorf("interrupted: %w", err)
 			}
-			var use *usageError
-			if errors.As(err, &use) {
-				die(exitUsage, err)
-			}
-			die(exitMechanical, err)
+			die(code, err)
 		}
 	default:
 		usage()
+	}
+}
+
+// exitCode classifies a failed run for whatever reads $?.
+//
+// interrupted is checked FIRST and deliberately outranks the error's own type.
+// A signal cancels every in-flight Invoke, so the run surfaces as whatever the
+// cancelled call returned — for a gate, gate.Gate correctly reports the
+// cancelled judges as mechanical rather than as a verdict. Classifying on the
+// error alone would therefore report "the machine broke" for what was really an
+// operator pressing Ctrl-C.
+func exitCode(interrupted bool, err error) int {
+	switch {
+	case interrupted:
+		return exitInterrupted
+	case errors.As(err, new(*plan.RejectedError)):
+		return exitRefused
+	case errors.As(err, new(*usageError)):
+		return exitUsage
+	default:
+		return exitMechanical
 	}
 }
 
@@ -76,11 +110,11 @@ func usage() {
 }
 
 func die(code int, err error) {
-	fmt.Fprintln(os.Stderr, "aw:", err)
+	fmt.Fprintln(os.Stderr, "dawn:", err)
 	os.Exit(code)
 }
 
-func execute(cmd string, args []string) error {
+func execute(ctx context.Context, cmd string, args []string) error {
 	positional, flags := split(args)
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	dir := fs.String("dir", ".dawn", "state directory: blobs/, trees/ and journal.jsonl")
@@ -115,7 +149,6 @@ func execute(cmd string, args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
 	r := &plan.Runner{Blobs: blobs, Journal: journal, Redo: redo.set(), Backend: backends(trees)}
 	if *in != "" {
 		tree, err := trees.Capture(ctx, *in)

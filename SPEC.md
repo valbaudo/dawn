@@ -309,6 +309,18 @@ Exit `0` accepted · `1` **gate refused** · `2` usage/parse/validate · `3` mec
 `130` interrupted. Unattended means something reads `$?`, and the distinction nothing
 else gives you is *the panel refused* vs *the machine broke*.
 
+**SIGINT and SIGTERM cancel the run and reap the agent CLI's whole process group.**
+An orphaned agent keeps spending money on a run nobody is waiting for, so an interrupt
+that leaves one behind is a leak, not a shutdown. Shutdown is bounded: the group kill is
+the mechanism and a 5s wait on inherited pipes is the backstop, so there is no
+second-signal force-quit to get wrong.
+
+An interrupt is **not a verdict**. Cancelling mid-gate cancels every judge at once, which
+by vote count is indistinguishable from a unanimous no; the judges' errors make the round
+mechanical, so an interrupt never records a rejection and never spends a repair attempt.
+It exits `130` even though the underlying error is mechanical, because *the operator
+stopped it* and *the machine broke* are different facts.
+
 ---
 
 ## Worked example
