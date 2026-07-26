@@ -384,6 +384,17 @@ round mechanical, so an interrupt never records a rejection and never spends a r
 attempt. It exits `130` even though the underlying error is mechanical, because *the
 operator stopped it* and *the machine broke* are different facts.
 
+**One `run` per state directory, enforced by an `flock`.** Two runs against one `--dir`
+corrupt nothing — journal lines are atomic appends and blobs are content-addressed — so
+the temptation is to allow them. They both miss the same key, both execute it, and both
+pay. That is what a cron does on the night a run overruns its own interval, and nothing
+in the output would tell you: the journal simply has two lines where you expected one.
+The second run is refused rather than queued, because an overrunning job should be told
+it is late, not stacked behind the run it is duplicating. `dawn show` never takes the
+lock — reading committed state is always safe. An `flock` rather than a pid file, so the
+kernel releases it when the process dies and there is no stale-lock heuristic to get
+wrong.
+
 ---
 
 ## Worked example

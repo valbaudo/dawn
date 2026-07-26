@@ -164,6 +164,14 @@ func execute(ctx context.Context, cmd string, args []string) error {
 		}
 		return showPlan(r, p)
 	}
+	// Taken for `run` only, and only once the plan has loaded: a bad plan should
+	// report its own error, not "another run holds the lock".
+	release, err := plan.LockRun(*dir)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	r.Log = func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }
 	fmt.Printf("[run] %s (%d steps)\n", positional[0], len(p.Steps))
 	done, err := r.Run(ctx, p)
