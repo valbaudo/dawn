@@ -224,10 +224,14 @@ func (p *Plan) validate() error {
 
 	for _, id := range p.IDs() {
 		s := p.Steps[id]
+		var trees []string // input names that bind a directory, not a scalar
 		for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
 			did, field, err := ParseRef(s.Inputs[name])
 			if err != nil {
 				return fmt.Errorf("step %q input %q: %w", id, name, err)
+			}
+			if field == "workspace" {
+				trees = append(trees, name)
 			}
 			if did == RootStep {
 				if field != "workspace" {
@@ -252,6 +256,13 @@ func (p *Plan) validate() error {
 			}
 			return fmt.Errorf("step %q input %q: step %q has no output field %q; it declares: %s",
 				id, name, did, field, strings.Join(fieldNames(up), ", "))
+		}
+		// The workspace input IS the working directory, so a second one asks for two
+		// cwds and gets whichever the runtime happens to pick. SPEC has always said
+		// "at most one"; until this check, nothing made it true.
+		if len(trees) > 1 {
+			return fmt.Errorf("step %q has %d workspace inputs (%s); at most one, because the workspace input is the step's working directory",
+				id, len(trees), strings.Join(trees, ", "))
 		}
 	}
 	_, err := p.order()

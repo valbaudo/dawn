@@ -45,9 +45,23 @@ type Tokens struct {
 type Journal struct{ path string }
 
 // OpenJournal opens (creating if needed) the journal under dir.
+//
+// It also marks the state directory ignored. `--dir` defaults to `.dawn` relative
+// to the cwd and `--in .` is the documented gesture, so the two together put the
+// store INSIDE the tree being captured: `git add -A` then sweeps blobs, the
+// journal and the object store into the agent's own workspace, while git is
+// writing objects into that same tree mid-scan. Measured before this line: eight
+// captures of an unchanged tree gave eight different root shas, 63 → 4543 objects.
+// A `*` ignores the directory's contents including the marker itself.
 func OpenJournal(dir string) (*Journal, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("journal: mkdir %s: %w", dir, err)
+	}
+	ignore := filepath.Join(dir, ".gitignore")
+	if _, err := os.Stat(ignore); os.IsNotExist(err) {
+		if err := os.WriteFile(ignore, []byte("*\n"), 0o644); err != nil {
+			return nil, fmt.Errorf("journal: mark %s ignored: %w", dir, err)
+		}
 	}
 	return &Journal{path: filepath.Join(dir, "journal.jsonl")}, nil
 }

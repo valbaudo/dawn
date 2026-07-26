@@ -88,6 +88,12 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 		}
 	}
 
+	// Single-writer by construction: the loop below is the only thing that touches
+	// `done`, and it is sequential. Parallelizing that range therefore needs a mutex
+	// HERE before it needs anything from the filesystem — a plain map racing on
+	// write is `fatal error: concurrent map writes`, which fires long before two
+	// workspaces could ever collide. Deliberately unlocked today: one goroutine, no
+	// contention, and a mutex guarding a sequential loop misrepresents the code.
 	done := map[string]StepResult{}
 	if r.Root != nil {
 		// The reserved root step: a value in the graph, not a special case in bind.

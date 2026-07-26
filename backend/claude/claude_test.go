@@ -143,9 +143,16 @@ func TestWorkspaceHonorsTheSchema(t *testing.T) {
 	bin := fakeCLI(t, `echo edited > a.txt
 echo '{"type":"result","is_error":false,"result":"{\"summary\":\"did it\"}","usage":{}}'`)
 
-	w := Workspace{Dir: work, Model: "haiku", Bin: bin, Trees: trees}
+	// Reaches the backend the way every real caller does: as a captured tree the
+	// backend materializes into its own scratch dir. There is no Dir field to set.
+	base, err := trees.Capture(context.Background(), work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := Workspace{Model: "haiku", Bin: bin, Trees: trees}
 	res, err := w.Invoke(context.Background(), dawn.Invocation{
 		Prompt: "edit it",
+		Inputs: map[string]dawn.Ref{"repo": {Kind: dawn.KindWorkspace, URI: base}},
 		Schema: map[string]any{
 			"type": "object", "additionalProperties": false,
 			"required":   []any{"summary"},

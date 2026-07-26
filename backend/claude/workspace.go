@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,16 +25,21 @@ import (
 // diffed later, not just consecutive ones.
 //
 // The directory needs no .git of its own; the tree store is the only repository
-// involved. Either set Dir, or pass a workspace ref in Invocation.Inputs and the
-// backend materializes it into a fresh temp dir first, which is how repo@vN
-// reaches the next agent.
+// involved. The workspace ref in Invocation.Inputs is materialized into a fresh
+// temp dir, which is how repo@vN reaches the next agent.
 //
-// SECURITY: editing files non-interactively requires --dangerously-skip-
-// permissions, which lets the agent modify anything under the working dir. Point
-// Workspace only at a tree you are willing to let it change; the demos use a
-// throwaway temp dir they create and delete.
+// ISOLATION: that fresh dir is the whole mechanism, and it is an allocator, not
+// an enforcer. Every invocation — so every gate attempt — gets its own 0700
+// MkdirTemp, which two steps cannot collide on because neither can name the
+// other's. There is deliberately no Dir field: a caller-supplied directory is the
+// only way two invocations could share one, so the guarantee is a property of the
+// type rather than a convention. See SPEC §8.
+//
+// It is NOT containment. Editing files non-interactively requires
+// --dangerously-skip-permissions, and an absolute path or a spawned subprocess
+// writes wherever the uid can. Point Workspace only at a tree you are willing to
+// let the agent change.
 type Workspace struct {
-	Dir     string        // working dir; empty means materialize from Inputs
 	Model   string        // default model; an Invocation may override
 	Bin     string        // defaults to "claude"
 	Timeout time.Duration // 0 => DefaultTimeout
@@ -70,21 +77,25 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 		bin = "claude"
 	}
 
-	dir := w.Dir
-	if dir == "" {
-		ref, ok := workspaceInput(in.Inputs)
-		if !ok {
-			return dawn.Result{}, fmt.Errorf("workspace: set Dir, or pass a workspace ref in Inputs to materialize")
+	ref, err := workspaceInput(in.Inputs)
+	if err != nil {
+		return dawn.Result{}, err
+	}
+	dir, err := os.MkdirTemp("", "dawn-ws-*")
+	if err != nil {
+		return dawn.Result{}, err
+	}
+	// The tree is captured below; the directory is scratch. A failure here leaks it
+	// rather than losing anything, but it is reported: silently leaking a
+	// materialized repo per invocation is how a disk fills up overnight with no
+	// record of why.
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "dawn: leaked scratch dir %s: %v\n", dir, err)
 		}
-		d, err := os.MkdirTemp("", "dawn-ws-*")
-		if err != nil {
-			return dawn.Result{}, err
-		}
-		defer os.RemoveAll(d) // the tree is captured below; the dir is scratch
-		if err := w.Trees.Materialize(ctx, ref.URI, d); err != nil {
-			return dawn.Result{}, err
-		}
-		dir = d
+	}()
+	if err := w.Trees.Materialize(ctx, ref.URI, dir); err != nil {
+		return dawn.Result{}, err
 	}
 
 	base, err := w.Trees.Capture(ctx, dir)
@@ -153,14 +164,30 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 	}, nil
 }
 
-// workspaceInput returns the first workspace-kind ref in inputs, if any.
-func workspaceInput(inputs map[string]dawn.Ref) (dawn.Ref, bool) {
-	for _, r := range inputs {
-		if r.Kind == dawn.KindWorkspace {
-			return r, true
+// workspaceInput returns the one workspace-kind ref in inputs.
+//
+// This used to range the map and take the first match, which with two workspace
+// refs picked the step's working directory at random — measured 173/27 over 200
+// resolutions, the kind of skew that passes every hand test and flips overnight.
+// The loader refuses two workspace inputs before a token is spent; the check is
+// repeated here because this is where every caller routes, including a backend
+// used directly with no plan in front of it.
+func workspaceInput(inputs map[string]dawn.Ref) (dawn.Ref, error) {
+	var found []string
+	for _, name := range slices.Sorted(maps.Keys(inputs)) {
+		if inputs[name].Kind == dawn.KindWorkspace {
+			found = append(found, name)
 		}
 	}
-	return dawn.Ref{}, false
+	switch len(found) {
+	case 0:
+		return dawn.Ref{}, fmt.Errorf("workspace: no workspace ref in inputs to materialize")
+	case 1:
+		return inputs[found[0]], nil
+	default:
+		return dawn.Ref{}, fmt.Errorf("workspace: %d workspace inputs (%s); the workspace input is the working directory, so there can be at most one",
+			len(found), strings.Join(found, ", "))
+	}
 }
 
 // CapturesTree marks Workspace as able to honor Invocation.Expect.
