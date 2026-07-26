@@ -218,6 +218,15 @@ a baseline is a starting point, not a floor.
 with "you did not produce X" and consumes an attempt at **zero judge tokens**; ungated,
 it fails the step. Every other capture error stays mechanical.
 
+**Every captured tree is pinned behind a ref.** `git write-tree` writes objects that
+nothing points at, so a store with no refs is one where every committed workspace is
+unreachable garbage by git's own definition — `git gc --prune=now` inside `.dawn/trees`
+deleted the lot, reproduced as `fatal: failed to unpack tree object`. dawn never runs
+gc, but an artifact that survives only until someone runs a standard maintenance command
+in the state directory is not durable. A ref points straight at the tree; no wrapper
+commit, which would carry a timestamp into something whose identity must stay its
+content.
+
 The host tree enters via `--in DIR`, never a key, so no machine-specific path lives in
 the file whose bytes are the plan's identity.
 
@@ -502,6 +511,13 @@ and a posture that dangerous should be a word an author typed.
 4. **`--in` is required for `dawn show PLAN`** (pricing needs the input digest) but optional
    for `dawn show PLAN REF` (reading a committed artifact must not need live host state).
    Documented rather than papered over.
+5. **The store only grows.** Pinning is per capture, including gate attempts nobody
+   accepted, so `git gc` now reclaims nothing. That is the deliberate side of the trade —
+   unbounded growth is a disk problem with an obvious fix, silent deletion of committed
+   state is not — but it is only half an answer. The other half is a prune, and the pins
+   are what make one expressible: a ref no journal line names is collectable, which is
+   not a question you can even ask of a dangling object. Stance: wait for a real store to
+   get big, then `dawn prune` reads the journal, deletes unnamed refs and runs gc.
 
 ---
 

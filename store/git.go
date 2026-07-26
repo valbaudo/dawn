@@ -108,7 +108,38 @@ func (t *Trees) CaptureFrom(ctx context.Context, workDir, base string, must ...s
 	if err != nil {
 		return "", fmt.Errorf("store: write-tree %s: %w: %s", workDir, err, out)
 	}
-	return strings.TrimSpace(out), nil
+	tree := strings.TrimSpace(out)
+	if err := t.pin(ctx, tree); err != nil {
+		return "", err
+	}
+	return tree, nil
+}
+
+// pin makes a captured tree reachable, so git's own garbage collector cannot
+// delete it.
+//
+// `write-tree` writes objects that NOTHING points at. A bare store with no refs
+// is a store where every committed workspace is unreachable garbage by git's
+// definition, and `git gc --prune=now` in .dawn/trees deletes the lot —
+// reproduced: `fatal: failed to unpack tree object`. Nothing in dawn runs gc, but
+// "the durable artifact survives only until someone runs a standard maintenance
+// command inside the state directory" is not durable.
+//
+// A ref may point straight at a tree; no wrapper commit is needed, which is
+// fortunate because a commit would carry a timestamp and a tree's identity must
+// stay its content. Verified: `for-each-ref` reports `<sha> tree
+// refs/dawn/t/<sha>`, and the tree survives `gc --prune=now`.
+//
+// Pinning is per capture, including gate attempts nobody accepted, so gc now
+// reclaims nothing. That is the deliberate trade: unbounded growth is a disk
+// problem with an obvious fix, and silent deletion of committed state is not. It
+// is also what makes a real prune possible later — a ref not named by the journal
+// is collectable, which is not a question you can even ask of a dangling object.
+func (t *Trees) pin(ctx context.Context, tree string) error {
+	if out, err := git(ctx, "", t.env("", ""), "update-ref", "refs/dawn/t/"+tree, tree); err != nil {
+		return fmt.Errorf("store: pin %s: %w: %s", tree, err, strings.TrimSpace(out))
+	}
+	return nil
 }
 
 // Materialize writes the tree ref into dir, creating it if needed. Existing

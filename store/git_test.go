@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -343,5 +344,53 @@ func TestCaptureFromRoundTripsAndKeepsDeclaredArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(gone, "dist", "app")); !os.IsNotExist(err) {
 		t.Fatal("a deleted file must not be resurrected by the baseline")
+	}
+}
+
+// `write-tree` writes objects nothing points at, so a bare store with no refs is
+// one where every committed workspace is unreachable garbage by git's own
+// definition. Reproduced before the fix: `git gc --prune=now` inside
+// .dawn/trees left `fatal: failed to unpack tree object`. dawn never runs gc,
+// but a durable artifact that survives only until someone runs a standard
+// maintenance command in the state directory is not durable.
+func TestCapturedTreesSurviveGitGC(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	src := t.TempDir()
+	writeFile(t, src, ".gitignore", "dist/\n")
+	writeFile(t, src, "main.go", "package main\n")
+	writeFile(t, src, "dist/app", "a binary\n")
+
+	ref, err := tr.Capture(ctx, src, "dist/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second, unrelated tree, so the test would notice a pin that only ever
+	// covers the most recent capture.
+	other := t.TempDir()
+	writeFile(t, other, "notes.md", "hello\n")
+	ref2, err := tr.Capture(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gc := exec.CommandContext(ctx, "git", "gc", "--prune=now")
+	gc.Env = append(os.Environ(), "GIT_DIR="+tr.gitDir)
+	if out, err := gc.CombinedOutput(); err != nil {
+		t.Fatalf("gc failed: %v: %s", err, out)
+	}
+
+	for _, want := range []string{ref, ref2} {
+		dst := t.TempDir()
+		if err := tr.Materialize(ctx, want, dst); err != nil {
+			t.Fatalf("gc destroyed committed tree %s: %v", want, err)
+		}
+	}
+	// The forced artifact must come back too, not just the tree object.
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, ref, dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "dist", "app")); err != nil {
+		t.Fatalf("a declared artifact must survive gc: %v", err)
 	}
 }
