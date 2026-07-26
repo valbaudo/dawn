@@ -76,7 +76,7 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 		if !ok {
 			return dawn.Result{}, fmt.Errorf("workspace: set Dir, or pass a workspace ref in Inputs to materialize")
 		}
-		d, err := os.MkdirTemp("", "aw-ws-*")
+		d, err := os.MkdirTemp("", "dawn-ws-*")
 		if err != nil {
 			return dawn.Result{}, err
 		}

@@ -1,4 +1,4 @@
-// Package store is aw's commit layer: content-addressed bytes. Put returns a
+// Package store is dawn's commit layer: content-addressed bytes. Put returns a
 // stable ref; Get round-trips it. Because a ref is the hash of its content,
 // "resume" for the linear case is nothing more than re-reading committed refs —
 // which is why dawn has no separate resume engine.

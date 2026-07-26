@@ -39,7 +39,7 @@ type Tokens struct {
 }
 
 // Journal is an append-only log of what a step's key resolved to. It is the whole
-// of aw's durable run state: there is no separate state file, and no resume mode.
+// of dawn's durable run state: there is no separate state file, and no resume mode.
 // `dawn run` looks up each key and skips what it finds, so re-running IS resuming —
 // one code path, exercised on every run rather than only after a crash.
 type Journal struct{ path string }

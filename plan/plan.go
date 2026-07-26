@@ -1,4 +1,4 @@
-// Package plan is aw's static-DAG runner: a strict, control-flow-free description
+// Package plan is dawn's static-DAG runner: a strict, control-flow-free description
 // of agent steps wired by typed references, executed in dependency order. There is
 // deliberately no templating and no if/loop/map — a step names its inputs, the
 // runner materializes them, and any unknown key is a parse error. Orchestration

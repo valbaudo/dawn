@@ -1,6 +1,6 @@
 # built binaries
-/aw
-/cmd/aw/aw
+/dawn
+/cmd/dawn/dawn
 *.test
 *.out
 

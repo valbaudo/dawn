@@ -61,7 +61,7 @@ func NewTrees(dir string) (*Trees, error) {
 // normal case) would be silently absent from the captured tree; and `git add -f`
 // fails loudly on a path that was never produced. Verified: with `dist/` ignored,
 // plain `add -A` yields a tree where dist/dawn does not exist, while
-// `add -f -- dist/aw` includes it and `add -f -- dist/nope` errors.
+// `add -f -- dist/dawn` includes it and `add -f -- dist/nope` errors.
 func (t *Trees) Capture(ctx context.Context, workDir string, must ...string) (string, error) {
 	idx, done, err := t.tempIndex()
 	if err != nil {
@@ -119,7 +119,7 @@ func (t *Trees) Diff(ctx context.Context, from, to string) (string, error) {
 // tempIndex mints a scratch index file so a capture never inherits or mutates
 // staging state from another call.
 func (t *Trees) tempIndex() (path string, done func(), err error) {
-	f, err := os.CreateTemp("", "aw-index-*")
+	f, err := os.CreateTemp("", "dawn-index-*")
 	if err != nil {
 		return "", nil, err
 	}
@@ -161,7 +161,7 @@ func git(ctx context.Context, dir string, env []string, args ...string) (string,
 	return out.String(), err
 }
 
-// Archive streams a captured tree as a tar to w. This is how a tree leaves aw:
+// Archive streams a captured tree as a tar to w. This is how a tree leaves dawn:
 // `dawn show plan.yaml fix.workspace | tar -x -C out/`. Piping rather than an
 // --into flag keeps dawn out of the business of reimplementing tar's own
 // --strip-components, --only and --list.

@@ -57,7 +57,7 @@ func TestInvalidationContract(t *testing.T) {
 		"constrain a field": func(s *Step, _ *Agent, _ *string) {
 			s.Outputs["text"] = Type{Enum: []string{"a", "b"}}
 		},
-		"declare an artifact": func(s *Step, _ *Agent, _ *string) { s.Expect = []string{"dist/aw"} },
+		"declare an artifact": func(s *Step, _ *Agent, _ *string) { s.Expect = []string{"dist/dawn"} },
 	}
 	for name, mutate := range differ {
 		t.Run("differs/"+name, func(t *testing.T) {

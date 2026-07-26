@@ -1,4 +1,4 @@
-// Package gate is aw's differentiator, kept deliberately as a LIBRARY, not an
+// Package gate is dawn's differentiator, kept deliberately as a LIBRARY, not an
 // engine primitive: an independent acceptance check over any set of
 // [dawn.Backend]s. A single judge is [Judge]; N judges with a k-of-N quorum is
 // [Jury]. Both are a fan-out of independent [dawn.Backend.Invoke] calls plus a

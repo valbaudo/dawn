@@ -192,7 +192,7 @@ func TestCaptureForcesDeclaredPathsPastGitignore(t *testing.T) {
 	d := t.TempDir()
 	writeFile(t, d, ".gitignore", "dist/\n")
 	writeFile(t, d, "main.go", "package main\n")
-	writeFile(t, d, "dist/aw", "a binary\n")
+	writeFile(t, d, "dist/dawn", "a binary\n")
 
 	// without declaring it, the artifact is silently dropped
 	plain, err := tr.Capture(ctx, d)
@@ -203,12 +203,12 @@ func TestCaptureForcesDeclaredPathsPastGitignore(t *testing.T) {
 	if err := tr.Materialize(ctx, plain, bare); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(bare, "dist", "aw")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(bare, "dist", "dawn")); !os.IsNotExist(err) {
 		t.Fatal("precondition: an ignored path should NOT be captured by default")
 	}
 
 	// declaring it forces it in
-	forced, err := tr.Capture(ctx, d, "dist/aw")
+	forced, err := tr.Capture(ctx, d, "dist/dawn")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestCaptureForcesDeclaredPathsPastGitignore(t *testing.T) {
 	if err := tr.Materialize(ctx, forced, dst); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(filepath.Join(dst, "dist", "aw"))
+	got, err := os.ReadFile(filepath.Join(dst, "dist", "dawn"))
 	if err != nil {
 		t.Fatalf("declared artifact missing from the tree: %v", err)
 	}
