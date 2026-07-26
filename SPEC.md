@@ -202,6 +202,18 @@ git add -f -- <expect…>     # forced past .gitignore, and errors if never prod
 Verified: with `dist/` ignored, plain `add -A` yields a tree where `dist/dawn`
 **does not exist** — the flagship artifact silently absent.
 
+**A capture is taken against the input tree as its baseline, so the filter applies only
+to files that APPEARED during the step.** Without that, `.gitignore` is re-applied from
+scratch at every hop and an artifact survives exactly one: `build` declares `dist/dawn`
+and forces it in, `smoke` receives the tree and has no reason to re-declare another
+step's artifact, and `smoke`'s output tree silently loses it. Measured before the
+baseline existed: capture → materialize → capture returned a *different* ref with the
+binary gone. So **materialize-then-capture is the identity** — a tree that changed sha by
+being written to disk and read back would not be content-addressed at all. What the
+agent newly creates under an ignored path (a `node_modules`, a build cache) is still
+untracked, still ignored, still out; and a file the agent deletes stays deleted, because
+a baseline is a starting point, not a floor.
+
 **A missed `expect:` path is a rejection, not a crash.** Under a gate it feeds repair
 with "you did not produce X" and consumes an attempt at **zero judge tokens**; ungated,
 it fails the step. Every other capture error stays mechanical.

@@ -273,3 +273,75 @@ func TestCaptureAcceptsARelativeWorkDir(t *testing.T) {
 		t.Fatalf("relative capture lost content: %q %v", got, err)
 	}
 }
+
+// A workspace ref IS a git tree sha, so materializing a tree and capturing it
+// back must be the identity. It was not: `git add -A` honors .gitignore for
+// UNTRACKED files, and an index minted per call has nothing tracked in it, so a
+// declared artifact forced past .gitignore by one step was silently dropped by
+// the next — which had no reason to re-declare another step's artifact.
+// Measured before the fix: 6fd375c… -> e1565f2…, with dist/app gone.
+func TestCaptureFromRoundTripsAndKeepsDeclaredArtifacts(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	src := t.TempDir()
+	writeFile(t, src, ".gitignore", "dist/\nnode_modules/\n")
+	writeFile(t, src, "main.go", "package main\n")
+	writeFile(t, src, "dist/app", "a binary\n")
+
+	// step A declares its artifact, forcing it past .gitignore
+	base, err := tr.Capture(ctx, src, "dist/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// step B receives A's workspace and does not re-declare A's artifact
+	work := t.TempDir()
+	if err := tr.Materialize(ctx, base, work); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tr.CaptureFrom(ctx, work, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != base {
+		t.Fatalf("materialize then capture must be the identity: %s -> %s", base, got)
+	}
+
+	// the agent edits a tracked file and creates ignored junk of its own
+	writeFile(t, work, "main.go", "package main // edited\n")
+	writeFile(t, work, "node_modules/x/y.js", "junk\n")
+	next, err := tr.CaptureFrom(ctx, work, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := tr.Materialize(ctx, next, out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "dist", "app")); err != nil {
+		t.Fatal("a declared artifact must survive a step that did not declare it")
+	}
+	// The filter still does the job it exists for: only NEW ignored files are cut.
+	if _, err := os.Stat(filepath.Join(out, "node_modules", "x", "y.js")); !os.IsNotExist(err) {
+		t.Fatal("newly created ignored files must still be filtered out")
+	}
+	edited, err := os.ReadFile(filepath.Join(out, "main.go"))
+	if err != nil || string(edited) != "package main // edited\n" {
+		t.Fatalf("an edit to a tracked file must be captured, got %q (%v)", edited, err)
+	}
+
+	// A baseline must not resurrect what the agent deleted.
+	if err := os.Remove(filepath.Join(work, "dist", "app")); err != nil {
+		t.Fatal(err)
+	}
+	after, err := tr.CaptureFrom(ctx, work, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := t.TempDir()
+	if err := tr.Materialize(ctx, after, gone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(gone, "dist", "app")); !os.IsNotExist(err) {
+		t.Fatal("a deleted file must not be resurrected by the baseline")
+	}
+}

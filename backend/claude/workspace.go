@@ -98,10 +98,11 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 		return dawn.Result{}, err
 	}
 
-	base, err := w.Trees.Capture(ctx, dir)
-	if err != nil {
-		return dawn.Result{}, err
-	}
+	// The baseline IS the input ref. Re-capturing the directory we just
+	// materialized to re-derive a tree we were handed was a full extra capture per
+	// invocation, and worse than redundant: a re-derivation can DIFFER from the
+	// thing it re-derives, which is how a declared artifact went missing.
+	base := ref.URI
 
 	// An editing agent NEEDS Claude Code's default system prompt (that is where its
 	// file tools are described), so unlike the text backend this one cannot replace
@@ -132,7 +133,7 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 	// Declared paths are forced into the tree AND asserted here — before the diff,
 	// before any judge. A step that did not produce what it promised fails without
 	// anyone paying to review it.
-	tree, err := w.Trees.Capture(ctx, dir, in.Expect...)
+	tree, err := w.Trees.CaptureFrom(ctx, dir, base, in.Expect...)
 	if err != nil {
 		return dawn.Result{}, err
 	}

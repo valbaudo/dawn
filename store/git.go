@@ -63,12 +63,38 @@ func NewTrees(dir string) (*Trees, error) {
 // plain `add -A` yields a tree where dist/dawn does not exist, while
 // `add -f -- dist/dawn` includes it and `add -f -- dist/nope` errors.
 func (t *Trees) Capture(ctx context.Context, workDir string, must ...string) (string, error) {
+	return t.CaptureFrom(ctx, workDir, "", must...)
+}
+
+// CaptureFrom is Capture against a baseline tree: everything in base is already
+// tracked, so .gitignore is applied only to files that APPEARED since.
+//
+// This is what makes a workspace survive a chain of steps. `git add -A` honors
+// .gitignore for UNTRACKED files, and an index minted per call has nothing
+// tracked in it — so a declared artifact that step A forced past .gitignore
+// (`dist/app` under an ignored `dist/`) was materialized into step B's workspace,
+// then silently dropped from B's capture, because B had no reason to re-declare
+// A's artifact. Measured before this existed: capture → materialize → capture
+// returned a DIFFERENT ref (6fd375c… → e1565f2…) with the artifact gone.
+//
+// Seeding the index from base fixes both halves at once: the round trip is
+// identity again, and the filter keeps doing the job it exists for — a
+// node_modules the agent created is still untracked, still ignored, still out.
+//
+// Determinism is unaffected: this is a pure function of (workDir bytes, base,
+// must), and a step whose input tree differs already has a different identity key.
+func (t *Trees) CaptureFrom(ctx context.Context, workDir, base string, must ...string) (string, error) {
 	idx, done, err := t.tempIndex()
 	if err != nil {
 		return "", err
 	}
 	defer done()
 	env := t.env(workDir, idx)
+	if base != "" {
+		if out, err := git(ctx, workDir, env, "read-tree", base); err != nil {
+			return "", fmt.Errorf("store: seed index from %s: %w: %s", base, err, out)
+		}
+	}
 	if out, err := git(ctx, workDir, env, "add", "-A"); err != nil {
 		return "", fmt.Errorf("store: capture %s: %w: %s", workDir, err, out)
 	}
