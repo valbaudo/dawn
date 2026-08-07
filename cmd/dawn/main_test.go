@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/valbaudo/dawn"
 	"github.com/valbaudo/dawn/plan"
@@ -219,6 +221,102 @@ func runCommitted(t *testing.T, p *plan.Plan, backend dawn.Backend) *plan.Runner
 	return r
 }
 
+// TestShowRefStreamsTar calls showRef with its own buffer, which leaves the one
+// token that matters untested: whether `execute` hands it os.Stdout. Swapping
+// that for io.Discard makes `dawn show PLAN REF | tar -x` emit nothing, exit 0,
+// and silently produce an empty directory — so drive the real command instead
+// and read the bytes back off a replaced stdout.
+func TestShowRefCommandWritesTarToStdout(t *testing.T) {
+	original := backendFactory
+	t.Cleanup(func() { backendFactory = original })
+	var mu sync.Mutex
+	calls := &[]dawn.Invocation{}
+	backendFactory = func(trees *store.Trees) func(plan.Agent) (dawn.Backend, error) {
+		return func(plan.Agent) (dawn.Backend, error) {
+			return capturingBackend{
+				recordingBackend: recordingBackend{mu: &mu, calls: calls},
+				trees:            trees,
+			}, nil
+		}
+	}
+	planPath := writePlan(t, "steps:\n  build:\n    agent: fake/m\n    prompt: build\n")
+	dir := t.TempDir()
+	if err := execute(context.Background(), "run", []string{planPath, "--dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "stdout")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stdout
+	os.Stdout = f
+	err = execute(context.Background(), "show", []string{planPath, "build.workspace", "--dir", dir})
+	os.Stdout = saved
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("the command wrote no bytes to stdout; `| tar -x` would silently yield an empty directory")
+	}
+	names := map[string]string{}
+	tr := tar.NewReader(bytes.NewReader(raw))
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("stdout is not a readable tar: %v", err)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names[h.Name] = string(body)
+	}
+	if got := names["artifact.txt"]; got != "built bytes\n" {
+		t.Fatalf("tar on stdout = %v, want artifact.txt with the captured bytes", names)
+	}
+}
+
+// capturingBackend writes a file and captures the real tree, so the committed
+// workspace ref points at bytes the store can archive.
+type capturingBackend struct {
+	recordingBackend
+	trees *store.Trees
+}
+
+func (b capturingBackend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
+	dir, err := os.MkdirTemp("", "dawn-test-ws-*")
+	if err != nil {
+		return dawn.Result{}, err
+	}
+	defer os.RemoveAll(dir)
+	if err := os.WriteFile(filepath.Join(dir, "artifact.txt"), []byte("built bytes\n"), 0o644); err != nil {
+		return dawn.Result{}, err
+	}
+	tree, err := b.trees.Capture(ctx, dir)
+	if err != nil {
+		return dawn.Result{}, err
+	}
+	res, err := b.recordingBackend.Invoke(ctx, in)
+	if err != nil {
+		return dawn.Result{}, err
+	}
+	res.Produced = map[string]dawn.Ref{"workspace": {
+		Kind: dawn.KindWorkspace, URI: tree, Media: "application/vnd.git-tree",
+	}}
+	return res, nil
+}
+
 func TestShowRefStreamsTar(t *testing.T) {
 	ctx := context.Background()
 	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "trees"))
@@ -315,6 +413,144 @@ func TestShowRefReturnsScalarWriterError(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("showRef error = %v, want sentinel writer error", err)
 	}
+}
+
+// recordingBackend answers conformingly and records what it was asked.
+type recordingBackend struct {
+	mu    *sync.Mutex
+	calls *[]dawn.Invocation
+	gate  chan struct{} // optional: closed once `want` calls are in flight at once
+	want  int
+}
+
+func (b recordingBackend) Name() string           { return "recording" }
+func (b recordingBackend) CapturesTree()          {}
+func (b recordingBackend) MaterializesWorkspace() {}
+func (b recordingBackend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
+	b.mu.Lock()
+	*b.calls = append(*b.calls, in)
+	n := len(*b.calls)
+	b.mu.Unlock()
+	if b.gate != nil {
+		if n >= b.want {
+			select {
+			case <-b.gate:
+			default:
+				close(b.gate)
+			}
+		}
+		select {
+		case <-b.gate:
+		case <-ctx.Done():
+			return dawn.Result{}, ctx.Err()
+		}
+	}
+	out := map[string]any{}
+	if req, ok := in.Schema["required"].([]any); ok {
+		for _, f := range req {
+			name, _ := f.(string)
+			out[name] = "ok"
+		}
+	}
+	return dawn.Result{Output: out, Produced: map[string]dawn.Ref{
+		"workspace": {Kind: dawn.KindWorkspace, URI: "tree-out"},
+	}}, nil
+}
+
+// A flag the parser ACCEPTS but whose value never reaches the Runner is worse
+// than one it rejects: the run does something other than what was typed and says
+// nothing. Every flag here is asserted by its effect, so deleting the wiring for
+// any of them turns this red.
+func TestAcceptedFlagValuesReachTheRunner(t *testing.T) {
+	original := backendFactory
+	t.Cleanup(func() { backendFactory = original })
+
+	setup := func(t *testing.T, gate chan struct{}, want int) (*sync.Mutex, *[]dawn.Invocation) {
+		t.Helper()
+		var mu sync.Mutex
+		calls := &[]dawn.Invocation{}
+		backendFactory = func(*store.Trees) func(plan.Agent) (dawn.Backend, error) {
+			return func(plan.Agent) (dawn.Backend, error) {
+				return recordingBackend{mu: &mu, calls: calls, gate: gate, want: want}, nil
+			}
+		}
+		return &mu, calls
+	}
+
+	t.Run("--dir places state where it was told", func(t *testing.T) {
+		setup(t, nil, 0)
+		planPath := writePlan(t, "steps:\n  draft:\n    agent: fake/m\n    prompt: write\n")
+		dir := filepath.Join(t.TempDir(), "state")
+		// A clean cwd, because the assertion below is "nothing landed in the
+		// DEFAULT .dawn" and the package directory is not guaranteed to be empty.
+		t.Chdir(t.TempDir())
+		if err := execute(context.Background(), "run", []string{planPath, "--dir", dir}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "journal.jsonl")); err != nil {
+			t.Fatalf("--dir was ignored; no journal under %s: %v", dir, err)
+		}
+		if _, err := os.Stat(".dawn"); err == nil {
+			t.Fatal("state landed in the default .dawn despite --dir")
+		}
+	})
+
+	t.Run("--in binds the reserved root step", func(t *testing.T) {
+		_, calls := setup(t, nil, 0)
+		planPath := writePlan(t, "steps:\n  edit:\n    agent: fake/m\n    prompt: edit\n    inputs: {repo: in.workspace}\n")
+		host := t.TempDir()
+		if err := os.WriteFile(filepath.Join(host, "a.txt"), []byte("hi\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := execute(context.Background(), "run",
+			[]string{planPath, "--dir", t.TempDir(), "--in", host}); err != nil {
+			t.Fatal(err)
+		}
+		if len(*calls) != 1 {
+			t.Fatalf("calls = %d, want 1", len(*calls))
+		}
+		ref, ok := (*calls)[0].Inputs["repo"]
+		if !ok || ref.Kind != dawn.KindWorkspace || ref.URI == "" {
+			t.Fatalf("--in did not reach the invocation as a workspace ref: %+v", (*calls)[0].Inputs)
+		}
+	})
+
+	t.Run("--redo re-pays a committed step", func(t *testing.T) {
+		_, calls := setup(t, nil, 0)
+		planPath := writePlan(t, "steps:\n  draft:\n    agent: fake/m\n    prompt: write\n")
+		dir := t.TempDir()
+		for range 2 {
+			if err := execute(context.Background(), "run", []string{planPath, "--dir", dir}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(*calls) != 1 {
+			t.Fatalf("the second run must be a cache hit; calls = %d", len(*calls))
+		}
+		if err := execute(context.Background(), "run",
+			[]string{planPath, "--dir", dir, "--redo", "draft"}); err != nil {
+			t.Fatal(err)
+		}
+		if len(*calls) != 2 {
+			t.Fatalf("--redo did not reach the Runner; calls = %d, want 2", len(*calls))
+		}
+	})
+
+	t.Run("--jobs actually overlaps independent steps", func(t *testing.T) {
+		// Both steps block until BOTH are in flight. With Jobs pinned to 1 this
+		// deadlocks and the context deadline fires, so the assertion is real
+		// concurrency rather than a value read back out of a struct.
+		gate := make(chan struct{})
+		setup(t, gate, 2)
+		planPath := writePlan(t, "steps:\n"+
+			"  left:\n    agent: fake/m\n    prompt: l\n"+
+			"  right:\n    agent: fake/m\n    prompt: r\n")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := execute(ctx, "run", []string{planPath, "--dir", t.TempDir(), "--jobs", "2"}); err != nil {
+			t.Fatalf("--jobs 2 must run the two independent steps at once: %v", err)
+		}
+	})
 }
 
 func writePlan(t *testing.T, contents string) string {

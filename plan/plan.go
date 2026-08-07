@@ -179,8 +179,23 @@ func (s Step) Fields() map[string]Type {
 	return s.Outputs
 }
 
+// canonicalExpect is what the engine — the identity key, the invocation, the
+// capture assertion — actually sees. Cleaned as well as sorted, so `./dist/out`
+// and `dist/out` are one question asked once rather than two cache misses.
 func (s Step) canonicalExpect() []string {
-	return slices.Sorted(slices.Values(s.Expect))
+	if len(s.Expect) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(s.Expect))
+	for _, e := range s.Expect {
+		clean, err := store.NormalizeWorkspacePath(e)
+		if err != nil {
+			clean = e // validate() already refused this; do not mask it here
+		}
+		out = append(out, clean)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // IDs returns the plan's step ids, sorted — the stable order everything else
@@ -205,7 +220,7 @@ func (p *Plan) validate() error {
 			return fmt.Errorf("step %q: %w", id, err)
 		}
 		for _, expected := range s.Expect {
-			if err := store.ValidateWorkspacePath(expected); err != nil {
+			if _, err := store.NormalizeWorkspacePath(expected); err != nil {
 				return fmt.Errorf("step %q expect %q: %w", id, expected, err)
 			}
 		}

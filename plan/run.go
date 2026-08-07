@@ -79,7 +79,7 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 	if err != nil {
 		return nil, err
 	}
-	if err := r.preflight(p); err != nil {
+	if err := r.preflight(p, true); err != nil {
 		return nil, err
 	}
 
@@ -320,9 +320,13 @@ type bound struct {
 	key    map[string]string
 }
 
-// bind resolves declared inputs. A state ref (a workspace, an artifact) travels
-// as a REF so the backend materializes it properly; only a scalar is rendered
-// into the prompt, because that is the only kind a model can read directly.
+// bind resolves declared inputs. A reference to a produced state ref travels as
+// a REF so the backend materializes it properly; only a scalar is rendered into
+// the prompt, because that is the only kind a model can read directly.
+//
+// The split is by FIELD NAME, not by Ref.Kind: `workspace` and `diff` are the
+// reserved names a tree-capturing backend produces, and everything else is a
+// declared output field, which is always a string.
 //
 // SORTED, not a map range. A provider's prompt cache is keyed on the exact
 // leading tokens, so a randomized fold order changes the prompt bytes on every run
@@ -351,7 +355,14 @@ func (r *Runner) bind(s Step, done map[string]StepResult) (bound, error) {
 // preflight resolves every configured backend and verifies that reserved tree
 // flows match the optional capabilities at both ends before any external state is
 // read or an invocation starts.
-func (r *Runner) preflight(p *Plan) (err error) {
+// preflight runs every check that can be made before a token is spent.
+//
+// requireRoot is false for one caller, [Runner.Committed]: reading state that is
+// already committed must not depend on live host state, so a missing --in leaves
+// the steps that need it `unknown` rather than failing the whole read. A plan's
+// independent branches stay readable. Running and pricing both pass true, because
+// both need the input digest to know WHICH result they are talking about.
+func (r *Runner) preflight(p *Plan, requireRoot bool) (err error) {
 	defer func() {
 		if err != nil {
 			err = &ValidationError{Err: err}
@@ -393,7 +404,7 @@ func (r *Runner) preflight(p *Plan) (err error) {
 		s := p.Steps[id]
 		consumer := backends[id]
 		for _, expected := range s.Expect {
-			if err := store.ValidateWorkspacePath(expected); err != nil {
+			if _, err := store.NormalizeWorkspacePath(expected); err != nil {
 				return fmt.Errorf("step %q expect %q: %w", id, expected, err)
 			}
 		}
@@ -407,7 +418,7 @@ func (r *Runner) preflight(p *Plan) (err error) {
 			if err != nil {
 				return fmt.Errorf("step %q input %q: %w", id, name, err)
 			}
-			if did == RootStep && r.Root == nil {
+			if did == RootStep && r.Root == nil && requireRoot {
 				return fmt.Errorf("step %q input %q references %s.workspace but no --in was given",
 					id, name, RootStep)
 			}
@@ -519,10 +530,15 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.B
 			return gate.Candidate{}, err
 		}
 		generated = append(generated, res)
-		// The jury receives the exact resolved generator request (scalar inputs and
-		// any appended repair feedback) followed by the whole validated output. Refs
-		// stay in Invocation.Inputs and must never leak into this textual evidence.
-		text, err := judgeEvidence(attempt.Prompt, res.Output)
+		// inv.Prompt, NOT attempt.Prompt. The jury sees the resolved generator
+		// request (scalar inputs included) and the whole validated output, and
+		// nothing else. attempt.Prompt carries the appended repair critique, which
+		// IS the panel's own round-1 verdicts attributed by judge name — handing it
+		// back would let every judge read the others before voting, which is the
+		// silently-green dependence §2 forbids. A judge votes on the work, never on
+		// what the panel already said about it. Refs stay in Invocation.Inputs and
+		// must never leak into this textual evidence.
+		text, err := judgeEvidence(inv.Prompt, res.Output)
 		if err != nil {
 			return gate.Candidate{}, err
 		}
@@ -630,12 +646,14 @@ type StepStatus struct {
 // everything past the first stale step is `unknown` rather than `stale`. That is
 // the price of early cutoff (an upstream that re-runs to identical bytes correctly
 // skips its descendants) and Nix has the same limitation with floating outputs.
-func (r *Runner) Status(p *Plan) ([]StepStatus, error) {
+func (r *Runner) Status(p *Plan) ([]StepStatus, error) { return r.status(p, true) }
+
+func (r *Runner) status(p *Plan, requireRoot bool) ([]StepStatus, error) {
 	order, err := p.order()
 	if err != nil {
 		return nil, err
 	}
-	if err := r.preflight(p); err != nil {
+	if err := r.preflight(p, requireRoot); err != nil {
 		return nil, err
 	}
 	done := map[string]StepResult{}
@@ -691,7 +709,11 @@ func worstCase(s Step) int {
 // re-execute it. Used by `dawn show PLAN REF` so reading a result and previewing a
 // run share one notion of what "already done" means.
 func (r *Runner) Committed(p *Plan, id string) (StepResult, bool, error) {
-	status, err := r.Status(p)
+	// requireRoot false: reading committed state must not depend on live host
+	// state. A step that genuinely needs --in to resolve its key still reads back
+	// `unknown` and returns false here, but a plan's OTHER branches stay readable
+	// instead of the whole read failing on a flag they never used.
+	status, err := r.status(p, false)
 	if err != nil {
 		return StepResult{}, false, err
 	}
@@ -700,6 +722,16 @@ func (r *Runner) Committed(p *Plan, id string) (StepResult, bool, error) {
 			continue
 		}
 		if st.State != "fresh" {
+			// Not fresh AND no root: say which flag is missing rather than "run it
+			// first", which would send the caller to `dawn run` only to be told the
+			// same thing one command later. Re-run with the requirement on, purely
+			// for the message — this is already the failure path, so it costs nothing
+			// on the path that works.
+			if r.Root == nil {
+				if err := r.preflight(p, true); err != nil {
+					return StepResult{}, false, err
+				}
+			}
 			return StepResult{}, false, nil
 		}
 		rec, err := load(r.Blobs, st.Ref)

@@ -19,6 +19,27 @@ func TestMemRejectsMalformedAndMissingRefs(t *testing.T) {
 	}
 }
 
+// The same guard on the store production actually runs. Mem is documented as
+// "used by tests and the demo"; FS is what cmd/dawn wires up, and it is the one
+// that gets handed refs read back off disk from committed journal state on the
+// resume path — exactly where an unvalidated ref can arrive.
+func TestFSRejectsMalformedAndMissingRefs(t *testing.T) {
+	b, err := NewFS(filepath.Join(t.TempDir(), "blobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{"not-a-ref", "", "sha1:abcdef", "SHA256:abcdef", "../escape"} {
+		if _, err := b.Get(ref); err == nil || !strings.Contains(err.Error(), "malformed ref") {
+			t.Fatalf("Get(%q) error = %v, want malformed ref", ref, err)
+		}
+	}
+	if _, err := b.Get(Ref([]byte("never stored"))); err == nil {
+		t.Fatal("a well-formed ref that was never stored must error")
+	} else if strings.Contains(err.Error(), "malformed ref") {
+		t.Fatalf("a well-formed missing ref must not read as malformed: %v", err)
+	}
+}
+
 func TestMemDefensiveCopies(t *testing.T) {
 	b := NewMem()
 	input := []byte("hello")

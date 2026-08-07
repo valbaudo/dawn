@@ -96,17 +96,30 @@ func TestBackendStablePrefixFlag(t *testing.T) {
 	bin := fakeCLI(t, `printf '%s\000' "$@" > "$DAWN_TEST_ARGV"
  echo '{"type":"result","is_error":false,"result":"pong","usage":{}}'`)
 
-	_, err := (Backend{Model: "haiku", Bin: bin}).Invoke(context.Background(), dawn.Invocation{Prompt: "ping"})
-	if err != nil {
-		t.Fatal(err)
+	// BOTH branches. Testing only the empty-System case leaves the flag deletable
+	// on the path that carries the panel: gate.Judge is the one production caller
+	// that supplies a System, so a caching regression there would ship green.
+	for _, tc := range []struct {
+		name, system, want string
+	}{
+		{name: "default system", system: "", want: defaultSystem},
+		{name: "caller system (the gate.Judge path)", system: "Approve only concise summaries.", want: "Approve only concise summaries."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (Backend{Model: "haiku", Bin: bin}).Invoke(context.Background(),
+				dawn.Invocation{Prompt: "ping", System: tc.system})
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := readArgv(t, argvPath)
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--system-prompt" && args[i+1] == tc.want {
+					return
+				}
+			}
+			t.Fatalf("argv lacks --system-prompt %q: %q", tc.want, args)
+		})
 	}
-	args := readArgv(t, argvPath)
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "--system-prompt" && args[i+1] == defaultSystem {
-			return
-		}
-	}
-	t.Fatalf("argv does not contain --system-prompt followed by the stable default: %q", args)
 }
 
 // Unattended plus no deadline means a hung tool call burns the night looking like

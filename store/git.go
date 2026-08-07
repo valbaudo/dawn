@@ -48,24 +48,47 @@ func (e *MissingPathError) Error() string {
 // a captured workspace. It is exported so plan validation and capture defense use
 // one definition rather than drifting.
 func ValidateWorkspacePath(p string) error {
+	clean, err := NormalizeWorkspacePath(p)
+	if err != nil {
+		return err
+	}
+	if clean != p {
+		return fmt.Errorf("path %q is not normalized", p)
+	}
+	return nil
+}
+
+// NormalizeWorkspacePath refuses a path that could escape or misname a captured
+// workspace, and returns the cleaned form of one that cannot.
+//
+// The split from [ValidateWorkspacePath] is the difference between UNSAFE and
+// merely UNTIDY. `./dist/out`, `dist//out` and `dist/out/` all name exactly
+// `dist/out`; refusing them buys no safety and fails plans that ran yesterday,
+// with no migration path and nothing for the author to do but retype a path that
+// was already unambiguous. So an author's `expect:` is normalized here, and
+// capture keeps the stricter check because by then the path has been through
+// this and a non-canonical one means dawn itself lost the invariant.
+//
+// The escape test runs AFTER cleaning, which is what makes it real: `dist/../..`
+// is only visibly an escape once it collapses to `..`.
+func NormalizeWorkspacePath(p string) (string, error) {
 	switch {
 	case p == "":
-		return fmt.Errorf("path is empty")
+		return "", fmt.Errorf("path is empty")
 	case strings.ContainsRune(p, '\\'):
-		return fmt.Errorf("path %q must use forward slashes", p)
+		return "", fmt.Errorf("path %q must use forward slashes", p)
 	case path.IsAbs(p):
-		return fmt.Errorf("path %q must be relative", p)
+		return "", fmt.Errorf("path %q must be relative", p)
 	case hasVolumePrefix(p):
-		return fmt.Errorf("path %q must not be volume-qualified", p)
-	case p == "." || p == ".." || strings.HasPrefix(p, "../"):
-		return fmt.Errorf("path %q must stay within the workspace", p)
-	case path.Clean(p) != p:
-		return fmt.Errorf("path %q is not normalized", p)
+		return "", fmt.Errorf("path %q must not be volume-qualified", p)
 	case strings.IndexFunc(p, unicode.IsControl) >= 0:
-		return fmt.Errorf("path %q contains control characters", p)
-	default:
-		return nil
+		return "", fmt.Errorf("path %q contains control characters", p)
 	}
+	clean := path.Clean(p)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path %q must stay within the workspace", p)
+	}
+	return clean, nil
 }
 
 func hasVolumePrefix(p string) bool {
@@ -147,10 +170,16 @@ func (t *Trees) CaptureFrom(ctx context.Context, workDir, base string, must ...s
 			declaredPath := filepath.Join(workDir, filepath.FromSlash(path))
 			info, err := os.Lstat(declaredPath)
 			if err != nil {
-				if os.IsNotExist(err) {
-					return "", &MissingPathError{Path: path}
-				}
-				return "", fmt.Errorf("store: inspect declared path %q: %w", path, err)
+				// ANY stat failure is a missing path, not just ENOENT. The question
+				// `expect:` asks is "did the agent put a usable entry here", and the
+				// answer is no whether the path is absent (ENOENT), whether a parent
+				// component came back a plain file (ENOTDIR — the agent wrote `dist`
+				// instead of `dist/`), or whether it is a symlink cycle (ELOOP). Those
+				// are the same authoring mistake with different errno, and os.IsNotExist
+				// is true only for the first, so splitting them sent the commonest case
+				// down the mechanical path: the gate aborted on attempt 1 with no
+				// feedback instead of telling the agent which path it owes.
+				return "", &MissingPathError{Path: path}
 			}
 			if info.IsDir() {
 				nonEmpty := false
@@ -349,11 +378,21 @@ func controlledGitEnv() []string {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_ATTR_NOSYSTEM=1",
-		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_COUNT=3",
 		"GIT_CONFIG_KEY_0=core.autocrlf",
 		"GIT_CONFIG_VALUE_0=false",
 		"GIT_CONFIG_KEY_1=core.excludesFile",
 		"GIT_CONFIG_VALUE_1="+os.DevNull,
+		// core.attributesFile, the excludesFile sibling that is easy to forget.
+		// GIT_ATTR_NOSYSTEM covers only the SYSTEM attributes file; git resolves the
+		// personal one from $XDG_CONFIG_HOME/git/attributes (else ~/.config/git/attributes)
+		// on a path independent of the config files, so GIT_CONFIG_GLOBAL=/dev/null
+		// does not suppress it — neutering global config makes git fall back to that
+		// default path rather than to nothing. Measured: `*.txt eol=crlf text` in a
+		// personal attributes file moved a captured ref, which moves the identity key,
+		// which re-pays committed work on a second machine.
+		"GIT_CONFIG_KEY_2=core.attributesFile",
+		"GIT_CONFIG_VALUE_2="+os.DevNull,
 	)
 }
 

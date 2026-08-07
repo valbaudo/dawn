@@ -67,9 +67,13 @@ never declarable. The step id `in` is reserved and filled by `--in DIR`.
   attempts is equally accepted under 5, which is policy — so fixing it changes no cache
   behavior and makes the cost preview exact.
 - **A judge sees** the gate criteria as its system instruction and deterministic
-  evidence containing the resolved generator prompt (including rendered scalar inputs
-  and repair feedback) plus the complete validated output object. Workspace refs and
-  the generator transcript are not included. Every judge receives identical bytes in
+  evidence containing the resolved generator prompt (rendered scalar inputs included)
+  plus the complete validated output object. Workspace refs and the generator
+  transcript are not included, and neither is the **repair critique** — that is the
+  panel's own prior verdicts, attributed by judge name, so feeding it back would let
+  round 2 read round 1 and make the panel dependent on itself in exactly the way that
+  fails silently green. The generator's prompt grows across repair rounds; the judge's
+  evidence does not, apart from the candidate. Every judge receives identical bytes in
   a fresh context against an engine-fixed verdict schema.
 - **Crash ≠ verdict.** A mechanical judge failure propagates; it never consumes an
   attempt and never reads as approval.
@@ -234,9 +238,17 @@ git add -f -- <expect…>     # forced past .gitignore, and errors if never prod
 ```
 
 Every git subprocess uses a controlled configuration environment. System and personal
-configuration, including `core.autocrlf`, global excludes, ambient `GIT_CONFIG_*`
-overrides, and system attributes, cannot alter the captured bytes. The workspace's own
-`.gitignore` remains in force.
+configuration — `core.autocrlf`, `core.excludesFile`, `core.attributesFile`, ambient
+`GIT_CONFIG_*` overrides, and the system config and attributes files — cannot alter the
+captured bytes. The workspace's own `.gitignore` remains in force.
+
+`core.attributesFile` is pinned by name rather than left to `GIT_ATTR_NOSYSTEM`, which
+covers only the SYSTEM attributes file. Git resolves the personal one from
+`$XDG_CONFIG_HOME/git/attributes` on a path of its own, so `GIT_CONFIG_GLOBAL=/dev/null`
+does not suppress it — neutering global config makes git fall back to that default path
+rather than to nothing. Measured: `*.txt eol=crlf text` in a personal attributes file
+moved a captured ref, which moves the identity key, which re-pays committed work on a
+second machine.
 
 Verified: with `dist/` ignored, plain `add -A` yields a tree where `dist/dawn`
 **does not exist** — the flagship artifact silently absent.
@@ -256,6 +268,19 @@ a baseline is a starting point, not a floor.
 **A missed `expect:` path is a rejection, not a crash.** Under a gate it feeds repair
 with "you did not produce X" and consumes an attempt at **zero judge tokens**; ungated,
 it fails the step. Every other capture error stays mechanical.
+
+**Missed means unstattable, not merely absent.** ENOENT is the rare case. The common
+one is an agent that wrote a plain file where a directory belongs, so a declared
+`dist/out.txt` stats ENOTDIR, or that left a symlink cycle, which stats ELOOP. Those are
+one authoring mistake wearing three errno, and testing only `os.IsNotExist` sent the
+commonest of them down the mechanical path — the gate aborted on attempt 1 with no
+feedback instead of telling the agent which path it still owes.
+
+**`expect:` paths are normalized, not policed for tidiness.** `./dist/out`, `dist//out`
+and `dist/out/` all name `dist/out`, so they load and collapse to one identity key.
+Refused instead are the paths that are not the same question: absolute, volume-qualified,
+backslashed, control-charactered, and anything that still escapes the workspace after
+cleaning — `dist/../..` is only visibly an escape once it collapses.
 
 **An embedded git repository fails the capture.** A directory carrying its own `.git` — a
 vendored dependency, a clone the agent made — is recorded by git as a *commit reference*,
@@ -558,10 +583,14 @@ and a posture that dangerous should be a word an author typed.
    manual of worked criteria, not a feature.
 3. ~~**Sequential execution.**~~ Answered: `--jobs N`. It changed no keys, because the DAG
    already said which steps are independent — the flag only stopped ignoring it.
-4. **`--in` follows plan references for both show forms.** `dawn show PLAN` and
-   `dawn show PLAN REF` both call `Runner.Status`, whose shared preflight requires a root
-   whenever the plan references `in.workspace`. A plan with no such reference needs no
-   `--in`.
+4. ~~**`--in` is optional for `dawn show PLAN REF`.**~~ Answered, and not the way the
+   promise was written. A step's key includes its resolved inputs, so a step that reads
+   `in.workspace` cannot be identified at all without the input digest — reading it back
+   was never independent of live host state, in any version. What IS achievable is the
+   narrower thing: a step that does not depend on the root reads back with no `--in`,
+   even in a plan whose other branches do. `Runner.Committed` therefore skips the root
+   requirement that `Run` and `dawn show PLAN` enforce, and a step that genuinely needs
+   the root still names the missing flag rather than reporting itself absent.
 5. **The store only grows.** Pinning is per capture, including gate attempts nobody
    accepted, so `git gc` now reclaims nothing. That is the deliberate side of the trade —
    unbounded growth is a disk problem with an obvious fix, silent deletion of committed
@@ -575,7 +604,7 @@ and a posture that dangerous should be a word an author typed.
 ## Delta
 
 The code implements this spec. `dawn run` and `dawn show` work end to end: typed
-outputs with load-time reference checking, inputs resolved by kind, `expect:`,
+outputs with load-time reference checking, inputs resolved by field name, `expect:`,
 gates with quorum and bounded repair, the identity key, the append-only journal,
 `--redo`, `--in`, `--jobs` step concurrency, per-step scratch dirs, deterministic tree
 capture and materialize, stable prefixes, Unix process-group cancellation, and the

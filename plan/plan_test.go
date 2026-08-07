@@ -5,6 +5,46 @@ import (
 	"testing"
 )
 
+// UNSAFE and UNTIDY are different. A path that cannot escape the workspace is
+// normalized rather than refused: `./dist/out` names exactly `dist/out`, and
+// failing a plan that ran yesterday over a leading `./` gives the author nothing
+// to fix. The engine — key, invocation, capture assertion — sees the clean form,
+// so the two spellings are one question asked once, not two cache misses.
+func TestLoadNormalizesUntidyExpectPaths(t *testing.T) {
+	for _, spelling := range []string{"dist/out", "./dist/out", "dist//out", "dist/./out", "dist/sub/../out"} {
+		t.Run(spelling, func(t *testing.T) {
+			y := head + "  build:\n    agent: x/tree\n    prompt: build\n    expect: [\"" + spelling + "\"]\n"
+			p, err := loadPlan(t, y)
+			if err != nil {
+				t.Fatalf("%q names dist/out and must load: %v", spelling, err)
+			}
+			got := p.Steps["build"].canonicalExpect()
+			if len(got) != 1 || got[0] != "dist/out" {
+				t.Fatalf("canonicalExpect() = %v, want [dist/out]", got)
+			}
+		})
+	}
+
+	// And the key must not distinguish them, which is the point of normalizing.
+	key := func(spelling string) string {
+		t.Helper()
+		y := head + "  build:\n    agent: x/tree\n    prompt: build\n    expect: [\"" + spelling + "\"]\n"
+		p, err := loadPlan(t, y)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := p.Steps["build"]
+		k, err := s.Key("build", Agent{Backend: "x", Model: "tree"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	if a, b := key("dist/out"), key("./dist/out"); a != b {
+		t.Fatalf("spelling changed the identity key: %s != %s", a, b)
+	}
+}
+
 func TestLoadRejectsInvalidExpectPaths(t *testing.T) {
 	for name, expect := range map[string]string{
 		"empty":            "",
@@ -12,8 +52,6 @@ func TestLoadRejectsInvalidExpectPaths(t *testing.T) {
 		"volume-qualified": "C:/output",
 		"dot":              ".",
 		"parent":           "../output",
-		"traversal":        "dist/../output",
-		"not normalized":   "dist//output",
 		"backslash":        `dist\\output`,
 		"newline":          "dist\\noutput",
 		"control":          "dist\\u0001output",

@@ -17,8 +17,10 @@ import (
 	"github.com/valbaudo/dawn/proc"
 )
 
-// DefaultTimeout bounds one invocation when a backend does not provide a
-// tighter timeout. proc.Command kills the whole process group when it expires.
+// DefaultTimeout bounds one invocation when a backend sets no timeout of its
+// own. NOT a ceiling: an explicit Timeout wins outright, looser included, so a
+// caller asking for four hours gets four hours. proc.Command kills the whole
+// process group when it expires.
 const DefaultTimeout = 30 * time.Minute
 
 // defaultSystem is the stable system prompt used when an Invocation declares

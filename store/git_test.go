@@ -337,6 +337,43 @@ func TestCaptureIgnoresPersonalAutocrlf(t *testing.T) {
 	}
 }
 
+// The excludesFile sibling. git resolves the PERSONAL attributes file from
+// $XDG_CONFIG_HOME/git/attributes on a path of its own, so neither
+// GIT_CONFIG_GLOBAL=/dev/null nor GIT_ATTR_NOSYSTEM (system file only) suppresses
+// it — and an eol= attribute moves the captured ref, which moves the identity key.
+func TestCaptureIgnoresPersonalAttributesFile(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	clean, hostile := t.TempDir(), t.TempDir()
+	writeFile(t, clean, "a.txt", "line one\nline two\n")
+	writeFile(t, hostile, "a.txt", "line one\nline two\n")
+
+	cleanRef, err := tr.Capture(ctx, clean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xdg := t.TempDir()
+	writeFile(t, xdg, "git/attributes", "*.txt eol=crlf text\n")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	hostileRef, err := tr.Capture(ctx, hostile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostileRef != cleanRef {
+		t.Fatalf("personal core.attributesFile changed capture: %s != %s", hostileRef, cleanRef)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, hostileRef, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "line one\nline two\n"; string(got) != want {
+		t.Fatalf("materialized bytes = %q, want %q", got, want)
+	}
+}
+
 func TestCaptureIgnoresPersonalExcludesFile(t *testing.T) {
 	tr, ctx := trees(t), context.Background()
 	clean, hostile := t.TempDir(), t.TempDir()
@@ -411,7 +448,7 @@ func TestGitEnvFiltersInheritedConfigCaseInsensitively(t *testing.T) {
 	if counts["GIT_CONFIG_PARAMETERS"] != 0 {
 		t.Fatal("mixed-case GIT_CONFIG_PARAMETERS survived filtering")
 	}
-	if counts["GIT_CONFIG_COUNT"] != 1 || values["GIT_CONFIG_COUNT"] != "2" {
+	if counts["GIT_CONFIG_COUNT"] != 1 || values["GIT_CONFIG_COUNT"] != "3" {
 		t.Fatalf("GIT_CONFIG_COUNT entries = %d, value = %q", counts["GIT_CONFIG_COUNT"], values["GIT_CONFIG_COUNT"])
 	}
 	if counts["GIT_ATTR_NOSYSTEM"] != 1 || values["GIT_ATTR_NOSYSTEM"] != "1" {
@@ -538,6 +575,46 @@ func TestCaptureFailsOnAMissingDeclaredPath(t *testing.T) {
 	}
 	if missing.Path != "dist/never-built" {
 		t.Fatalf("Path = %q", missing.Path)
+	}
+}
+
+// The commonest way an agent misses a declared path is not leaving it absent —
+// it is writing a plain file where a directory belongs, which stats as ENOTDIR,
+// or leaving a symlink cycle, which stats as ELOOP. Both are the same authoring
+// mistake as ENOENT and must reach the repair loop, not abort the run.
+func TestCaptureTreatsAnUnstatableDeclaredPathAsMissing(t *testing.T) {
+	for _, tc := range []struct {
+		name, declared string
+		build          func(t *testing.T, dir string)
+	}{
+		{
+			name: "parent is a file", declared: "dist/out.txt",
+			build: func(t *testing.T, dir string) { writeFile(t, dir, "dist", "not a directory\n") },
+		},
+		{
+			name: "symlink cycle", declared: "loop/out.txt",
+			build: func(t *testing.T, dir string) {
+				if err := os.Symlink("loop", filepath.Join(dir, "loop")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr, ctx := trees(t), context.Background()
+			d := t.TempDir()
+			writeFile(t, d, "main.go", "package main\n")
+			tc.build(t, d)
+
+			_, err := tr.Capture(ctx, d, tc.declared)
+			var missing *MissingPathError
+			if !errors.As(err, &missing) {
+				t.Fatalf("error = %T %v, want *MissingPathError so the gate can repair it", err, err)
+			}
+			if missing.Path != tc.declared {
+				t.Fatalf("Path = %q, want %q", missing.Path, tc.declared)
+			}
+		})
 	}
 }
 

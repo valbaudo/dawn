@@ -86,9 +86,12 @@ field required, always, so there are no optional fields and **a reference that
 loads can never resolve to a missing value**. A reference to a field the upstream
 does not declare fails when the plan loads, before a token is spent.
 
-Inputs resolve by kind: a workspace ref travels into the next invocation and is
-materialized by the workspace backend, while a scalar is rendered into the prompt.
-Both are committed, so a later run can still hand a workspace to the next step.
+Inputs resolve by FIELD NAME, not by inspecting a value's kind: `workspace` and
+`diff` are the reserved names a tree-capturing step produces, and every other
+name is a declared output field, which is always a string. A workspace reference
+travels into the next invocation as a ref and is materialized by the workspace
+backend; a scalar is rendered into the prompt. Both are committed, so a later run
+can still hand a workspace to the next step.
 The public `value`, `artifact`, and `session` kinds remain reserved for future
 backends; the current binary emits none in `Result.Produced`. Scalar values live
 in `Result.Output`.

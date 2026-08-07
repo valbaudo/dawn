@@ -216,8 +216,6 @@ func TestJudgeMalformedVerdictIsErrorNotRejection(t *testing.T) {
 	cases := map[string]map[string]any{
 		"missing approved":  {"reason": "I cannot help with that"},
 		"non-bool approved": {"approved": "yes", "reason": "stringly typed"},
-		"missing reason":    {"approved": true},
-		"non-string reason": {"approved": true, "reason": 42},
 		"empty output":      {},
 	}
 	for name, out := range cases {
@@ -228,6 +226,32 @@ func TestJudgeMalformedVerdictIsErrorNotRejection(t *testing.T) {
 			}
 			if v.Approved {
 				t.Fatal("a malformed verdict must never read as approval")
+			}
+		})
+	}
+}
+
+// The mirror image: `reason` decides nothing, so a judge that omits it or types
+// it badly has still voted. Failing the run on a field nothing counts makes
+// success depend on a model's output discipline, and turns a panel that reached
+// quorum cleanly into a hard failure.
+func TestJudgeVotesWithoutAUsableReason(t *testing.T) {
+	cases := map[string]map[string]any{
+		"missing reason":    {"approved": true},
+		"non-string reason": {"approved": true, "reason": 42},
+		"null reason":       {"approved": true, "reason": nil},
+	}
+	for name, out := range cases {
+		t.Run(name, func(t *testing.T) {
+			v := Judge(context.Background(), malformedJudge{"m", out}, "sys", "candidate")
+			if v.Err != nil {
+				t.Fatalf("reason is provenance, not a verdict: %v", v.Err)
+			}
+			if !v.Approved {
+				t.Fatal("the approval was well-formed and must be counted")
+			}
+			if v.Reason != "" {
+				t.Fatalf("Reason = %q, want empty", v.Reason)
 			}
 		})
 	}

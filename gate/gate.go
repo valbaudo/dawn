@@ -70,13 +70,16 @@ func Judge(ctx context.Context, judge dawn.Backend, system, candidate string) Ve
 		v.Err = fmt.Errorf("judge %s: no boolean \"approved\" in verdict (got %v)", v.Judge, res.Output)
 		return v
 	}
-	reason, ok := res.Output["reason"].(string)
-	if !ok {
-		v.Err = fmt.Errorf("judge %s: no string \"reason\" in verdict (got %v)", v.Judge, res.Output)
-		return v
-	}
+	// `reason` is NOT load-bearing, so a missing one is not a mechanical failure.
+	// Only `approved` decides anything: it drives the quorum count, and reading a
+	// missing one as false would turn a parse failure into a quality rejection.
+	// `reason` is provenance — it fills the objection line and the repair critique.
+	// Erroring on it makes the run's success depend on a model's output discipline
+	// about a field nothing counts, and turns a panel that voted cleanly into a
+	// hard failure. An absent reason simply leaves the objection empty, which
+	// `objections` already renders as "no reasons given".
 	v.Approved = approved
-	v.Reason = reason
+	v.Reason, _ = res.Output["reason"].(string)
 	return v
 }
 

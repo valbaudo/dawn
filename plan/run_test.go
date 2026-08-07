@@ -218,7 +218,10 @@ func (g sequencedGenerator) Invoke(_ context.Context, in dawn.Invocation) (dawn.
 	return dawn.Result{Output: g.output}, nil
 }
 
-func TestJudgeEvidenceIncludesRepairFeedback(t *testing.T) {
+// The generator's prompt GROWS across repair rounds; the judge's evidence must
+// not. The appended critique is the panel's own prior verdicts, so echoing it
+// back to the panel is what makes round 2 dependent on round 1.
+func TestRepairGrowsTheGeneratorPromptButNotTheJudgeEvidence(t *testing.T) {
 	judge := &recordingJudge{approveAt: 2}
 	var generated []dawn.Invocation
 	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
@@ -249,13 +252,20 @@ func TestJudgeEvidenceIncludesRepairFeedback(t *testing.T) {
 	if !strings.HasPrefix(request, "Generator request:\nwrite") {
 		t.Fatalf("repair changed stable evidence prefix:\n%s", request)
 	}
-	for _, want := range []string{rejectionHeadingForTest, "make it concise"} {
-		if !strings.Contains(request, want) {
-			t.Errorf("generator request section missing %q:\n%s", want, request)
+	// Neither section may carry the critique. The request section is the ORIGINAL
+	// prompt, not the attempt's, so a judge in round 2 cannot read round 1's votes.
+	for _, forbidden := range []string{rejectionHeadingForTest, "make it concise"} {
+		if strings.Contains(request, forbidden) {
+			t.Errorf("panel verdict leaked into the judge's request section %q:\n%s", forbidden, request)
 		}
-		if strings.Contains(output, want) {
-			t.Errorf("repair feedback leaked into captured output section %q:\n%s", want, output)
+		if strings.Contains(output, forbidden) {
+			t.Errorf("repair feedback leaked into captured output section %q:\n%s", forbidden, output)
 		}
+	}
+	// Both rounds must show the judge byte-identical evidence apart from the
+	// candidate itself — that is what "a fresh context per invocation" means here.
+	if calls[0].Prompt != calls[1].Prompt {
+		t.Errorf("judge evidence drifted between rounds:\nround 1:\n%s\nround 2:\n%s", calls[0].Prompt, calls[1].Prompt)
 	}
 	if output != "{\n  \"text\": \"fixed candidate\"\n}" {
 		t.Fatalf("captured output must be fixed generator output, got:\n%s", output)
@@ -304,6 +314,112 @@ func TestGatedStepRepairs(t *testing.T) {
 	}
 	if done["draft"].Ref == "" {
 		t.Fatal("expected a committed result")
+	}
+}
+
+// treeAgent both captures and materializes, i.e. the `claude-ws` posture.
+type treeAgent struct{ producer }
+
+func (treeAgent) MaterializesWorkspace() {}
+
+// Reading committed state must not depend on live host state. A plan can have a
+// branch that never touches the --in tree, and asking for THAT branch's result
+// must not fail on a flag it does not use.
+func TestCommittedReadsABranchThatNeverTouchedTheRoot(t *testing.T) {
+	yaml := head +
+		"  edit:\n    agent: x/tree\n    prompt: edit\n    inputs: {repo: in.workspace}\n" +
+		"  note:\n    agent: x/text\n    prompt: note\n"
+	p, err := loadPlan(t, yaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	back := byModel(map[string]dawn.Backend{"tree": treeAgent{}, "text": echo{calls: new(int)}})
+
+	with := durable(t, dir, back)
+	with.Root = &dawn.Ref{Kind: dawn.KindWorkspace, URI: "tree-root"}
+	if _, err := with.Run(context.Background(), p); err != nil {
+		t.Fatalf("seeding the journal: %v", err)
+	}
+
+	// Same state dir, no Root at all — as if `dawn show PLAN note.text` ran with
+	// no --in on another machine.
+	without := durable(t, dir, back)
+	rec, ok, err := without.Committed(p, "note")
+	if err != nil {
+		t.Fatalf("reading an independent branch must not need --in: %v", err)
+	}
+	if !ok || rec.Ref == "" {
+		t.Fatal("note was committed; reading it back without --in must find it")
+	}
+
+	// The step that DOES need the root still reports the missing flag by name,
+	// rather than sending the caller to `dawn run` to be told the same thing.
+	if _, _, err := without.Committed(p, "edit"); err == nil {
+		t.Fatal("a step that needs the root must not silently read as absent")
+	} else if !strings.Contains(err.Error(), "--in") {
+		t.Fatalf("error should name the missing flag, got: %v", err)
+	}
+}
+
+// listener is a voter that also records every candidate it was asked to judge.
+type listener struct {
+	voter
+	mu   *sync.Mutex
+	seen *[]string
+}
+
+func (l listener) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
+	l.mu.Lock()
+	*l.seen = append(*l.seen, in.Prompt)
+	l.mu.Unlock()
+	return l.voter.Invoke(ctx, in)
+}
+
+// A repair round must not show the panel its own previous verdicts. The critique
+// is appended to the GENERATOR's prompt, and handing that same prompt to the
+// judges would let round 2 read round 1's votes — the silently-green dependence
+// the fresh-context rule exists to prevent.
+func TestRepairDoesNotShowJudgesTheirOwnVerdicts(t *testing.T) {
+	var mu sync.Mutex
+	var candidates []string
+	// A counter PER judge, so every judge rejects its own first call and the
+	// panel genuinely reaches a second round. A shared counter would let two
+	// judges flip inside round one and approve immediately.
+	j := func(name string) dawn.Backend {
+		return listener{
+			voter: voter{name: name, flipAfter: 1, seen: new(atomic.Int64)},
+			mu:    &mu, seen: &candidates,
+		}
+	}
+	// A generator that does NOT echo its prompt. producer{} echoes, which would
+	// route the critique into the output field and mask what is being tested:
+	// whether dawn puts it there, not whether a model quotes it back.
+	var n int
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"gen": counting{n: &n},
+		"a":   j("a"), "b": j("b"), "c": j("c"),
+	})}
+	if _, err := r.Run(context.Background(), gated(&Gate{
+		Judges: []string{"x/a", "x/b", "x/c"}, Criteria: "be good",
+	})); err != nil {
+		t.Fatalf("the gate should have accepted the repaired attempt: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(candidates) < 4 {
+		t.Fatalf("expected a second repair round to reach the judges, got %d candidates", len(candidates))
+	}
+	for i, c := range candidates {
+		// "because <name>" is a voter's own reason string, so its presence in a
+		// candidate means one judge is reading another's verdict.
+		if strings.Contains(c, "because ") {
+			t.Fatalf("candidate %d leaked a panel verdict to the judges:\n%s", i, c)
+		}
+		if strings.Contains(c, "REJECTED") || strings.Contains(c, "objection") {
+			t.Fatalf("candidate %d leaked repair feedback to the judges:\n%s", i, c)
+		}
 	}
 }
 
@@ -695,7 +811,7 @@ func TestPreflightResolvesAllBackendsBeforeCapabilityValidation(t *testing.T) {
 		return textProducer{calls: &calls}, nil
 	}}
 
-	err := r.preflight(p)
+	err := r.preflight(p, true)
 	var validation *ValidationError
 	if !errors.As(err, &validation) {
 		t.Fatalf("preflight failure must be a ValidationError, got %T: %v", err, err)
