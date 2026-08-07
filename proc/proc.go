@@ -7,9 +7,10 @@
 // prevent — a supervisor whose timeouts do not fire is worse than no timeout,
 // because it looks like slow work.
 //
-// Every child therefore gets its own process group, cancellation signals the
-// whole group, and a WaitDelay bounds how long Wait will block on inherited
-// pipes even if something escapes the group.
+// On Unix, every child therefore gets its own process group and cancellation
+// signals the whole group. On non-Unix platforms cancellation kills only the
+// direct child. On every platform a WaitDelay bounds how long Wait will block
+// on inherited pipes.
 package proc
 
 import (
@@ -19,12 +20,14 @@ import (
 )
 
 // WaitDelay bounds the wait for inherited pipes to close after the process is
-// gone. It is the backstop for a grandchild that escaped the group kill (a
-// double-fork, a new session); the group kill is the primary mechanism.
+// gone. On Unix it backs up process-group cancellation when a grandchild escapes
+// the group (a double-fork or new session); elsewhere it bounds pipe waits after
+// the direct child is killed.
 const WaitDelay = 5 * time.Second
 
-// Command builds a child process whose whole process group is killed when ctx is
-// cancelled. Callers set Dir, Env, Stdout and Stderr as usual.
+// Command builds a child process that is killed when ctx is cancelled. On Unix
+// cancellation kills its whole process group; elsewhere it kills the direct
+// child. Callers set Dir, Env, Stdout and Stderr as usual.
 //
 // Stdin is nil by default: `claude -p` and friends drain an inherited stdin and
 // hang waiting for input that a non-interactive caller never sends.

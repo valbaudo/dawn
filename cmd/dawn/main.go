@@ -52,15 +52,10 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	switch cmd {
 	case "run", "show":
-		// A scheduler's SIGTERM and an operator's Ctrl-C both cancel ctx, and
-		// proc.Command turns cancellation into a process-group kill: the agent CLI
-		// and the tool subprocesses it spawned die with the run instead of outliving
-		// it. Unattended, an orphaned agent CLI keeps burning tokens against a run
-		// nobody is waiting for.
-		//
-		// No second-signal force-quit: shutdown is bounded by proc.WaitDelay per
-		// child, and the groups are reaped concurrently, so --jobs N costs the same
-		// wall clock to shut down as --jobs 1.
+		// A scheduler's SIGTERM and an operator's Ctrl-C both cancel ctx. On Unix,
+		// proc.Command turns cancellation into a process-group kill, so the agent
+		// CLI and its tool subprocesses die with the run. Other platforms kill the
+		// direct child only. proc.WaitDelay bounds inherited-pipe waits everywhere.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := execute(ctx, cmd, args); err != nil {

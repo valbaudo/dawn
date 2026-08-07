@@ -20,9 +20,12 @@ type Kind string
 
 const (
 	KindValue     Kind = "value"     // small JSON / scalar result
-	KindArtifact  Kind = "artifact"  // a file or immutable blob
 	KindWorkspace Kind = "workspace" // a directory / repository tree
-	KindSession   Kind = "session"   // agent-native conversation/session state
+
+	// KindArtifact and KindSession are reserved for future backends. The current
+	// binary produces neither kind; declared files live inside a workspace ref.
+	KindArtifact Kind = "artifact"
+	KindSession  Kind = "session"
 )
 
 // Ref is a content-addressed reference to a piece of state. The bytes live in a
@@ -45,8 +48,8 @@ type Invocation struct {
 	Inputs map[string]Ref // named state fed in (materialized by the backend)
 	// Expect names paths that MUST exist in what this invocation produces. It is
 	// a postcondition, not a request: a backend that captures a tree asserts it at
-	// capture time, so a step that failed to produce a declared artifact fails
-	// before anything downstream — including a judge — is paid for.
+	// capture time. Under a gate, a missing path rejects that attempt before any
+	// judge is paid and can trigger repair; without a gate it fails the step.
 	Expect []string
 }
 
@@ -74,10 +77,10 @@ type WorkspaceMaterializer interface {
 type Result struct {
 	Output map[string]any // typed output (validated against Invocation.Schema by the caller)
 	Tokens Tokens         // cost / cache signal
-	// Produced holds new state refs this invocation created — a workspace diff,
-	// a captured session, an artifact. Empty for a plain text call. This is the
-	// other half of state transfer: what one invocation emits, the next consumes
-	// via Invocation.Inputs.
+	// Produced holds new state refs this invocation created. The current tree-
+	// capturing backend emits a workspace ref; declared files are contained in
+	// that tree rather than emitted as independent artifact refs. It is empty for
+	// a plain text call. The next invocation consumes these refs via Inputs.
 	Produced map[string]Ref `json:"produced,omitempty"`
 }
 

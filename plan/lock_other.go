@@ -4,9 +4,9 @@ package plan
 
 import "os"
 
-// flock is POSIX. Elsewhere concurrent runs are unguarded: they still corrupt
-// nothing, they just both pay. Matching proc's pgid split rather than dropping
-// the platform.
+// The run lock is a Unix-only guarantee. On other platforms this no-op keeps
+// the binary available, but concurrent runs against one state directory are
+// unguarded and can execute the same work and pay twice.
 func lockFile(*os.File) error { return nil }
 
 func unlockFile(*os.File) {}

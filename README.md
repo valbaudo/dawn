@@ -14,7 +14,7 @@ and everything else is plain code whose dependency arrows all point at `dawn`.
 | Path | What | Depends on |
 |------|------|------------|
 | `dawn.go` | core types + the `Backend` seam | nothing |
-| `proc/` | child processes whose whole group dies on cancel, so timeouts fire | nothing |
+| `proc/` | child processes; on Unix their whole group dies on cancel, with a bounded pipe-wait fallback everywhere | nothing |
 | `store/` | content-addressed state: `Blobs` for bytes (`Mem`, durable `FS`), `Trees` for directories (git-backed) | `proc` |
 | `gate/` | judge / jury / k-of-N quorum / repair loop — a library, not an engine | `dawn` |
 | `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures + materializes a tree | `dawn`, `store` |
@@ -25,7 +25,9 @@ Add a backend or a store behind its interface; the core never changes. Resume is
 feature and not a flag: a step's identity is a hash of the question it asks (its
 resolved definition plus its resolved input refs), so **re-running the same command
 IS the resume** — and the recovery path is the normal path, exercised every run.
-Edit one prompt and exactly that step and its descendants re-run.
+Edit one prompt and exactly that step and its descendants re-run. Independent ready
+steps run concurrently when `--jobs N` is greater than one; `--jobs 1` preserves the
+sequential topological order.
 
 One dependency, `gopkg.in/yaml.v3`, used only by the plan loader. The core is dep-free.
 
@@ -46,6 +48,9 @@ go run ./cmd/dawn run  examples/gated.yaml         # a gated step: draft -> 3-mo
 go run ./cmd/dawn run  examples/repo.yaml --in examples/calc
 go run ./cmd/dawn show examples/repo.yaml test.workspace --in examples/calc | tar -x -C out/
 ```
+
+Both `run` and `show` accept the same four flags: `--dir`, `--in`, repeatable
+`--redo`, and `--jobs`. `--jobs` is accepted but inert on `show`.
 
 ## The plan format
 
@@ -81,10 +86,11 @@ field required, always, so there are no optional fields and **a reference that
 loads can never resolve to a missing value**. A reference to a field the upstream
 does not declare fails when the plan loads, before a token is spent.
 
-Inputs resolve by kind: a state ref (a workspace, an artifact) travels as a ref
-into the next invocation and is materialized by the backend, while a scalar is
-rendered into the prompt. Both are committed, so a later run can still hand a
-workspace to the next step.
+Inputs resolve by kind: a workspace ref travels into the next invocation and is
+materialized by the workspace backend, while a scalar is rendered into the prompt.
+Both are committed, so a later run can still hand a workspace to the next step.
+The public `artifact` and `session` kinds are reserved for future backends; the
+current binary produces neither.
 
 ```yaml
 steps:
@@ -114,8 +120,12 @@ A tree ref is a git tree sha, so identity really is the content: the same bytes
 captured on another day, by another user, on another machine give the same ref.
 Symlinks round-trip, the exec bit is normalized, identical blobs are stored once
 across versions, `.gitignore` is honored, and **any two captured refs diff
-directly** — not just consecutive ones. The working directory needs no `.git`;
-the store is the only repository involved.
+directly** — not just consecutive ones. System and personal git configuration
+cannot change capture semantics: dawn disables ambient attributes, line-ending
+conversion, and global excludes while preserving the workspace's `.gitignore`.
+The working directory needs no `.git`; the store is the only repository involved.
+A declared `expect:` path is force-added to this workspace tree (even when ignored)
+and must exist; it is not emitted as a separate artifact ref.
 
 ## What it refuses to do
 
@@ -130,13 +140,20 @@ is watching and the wrong one when nobody is.
 
 Timeouts have to actually fire, too. An agent CLI spawns tool subprocesses that
 inherit its stdout, so killing the CLI alone leaves the pipe open and a cancelled
-context turns into a hang that looks exactly like slow work. Every child runs in
-its own process group and cancellation signals the group.
+context turns into a hang that looks exactly like slow work. On Unix each child
+runs in its own process group and cancellation kills that group. On non-Unix
+platforms cancellation kills only the direct child; on every platform a five-second
+`WaitDelay` bounds waiting for inherited pipes.
+
+One-run-per-state-directory locking is also Unix-only: `run` takes a non-blocking
+`flock`, while `show` never locks. Non-Unix builds compile, but the run lock is a
+no-op, so concurrent runs can duplicate work and cost. This lock prevents duplicate
+payment, not storage corruption.
 
 ## Not here yet
 
-More backends (codex, an HTTP LLM), and concurrency beyond the jury. Each slots
-behind an existing seam without touching the core.
+More backends (codex, an HTTP LLM). Each slots behind an existing seam without
+touching the core.
 
-The language is specified in [SPEC.md](SPEC.md) — 10 keys, 2 commands, 3 flags —
+The language is specified in [SPEC.md](SPEC.md) — 10 keys, 2 commands, 4 flags —
 and the more useful half of that document is what it deliberately refuses, and why.

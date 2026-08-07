@@ -66,9 +66,11 @@ never declarable. The step id `in` is reserved and filled by `--in DIR`.
   `attempts` is already excluded from the identity key — a result accepted under 3
   attempts is equally accepted under 5, which is policy — so fixing it changes no cache
   behavior and makes the cost preview exact.
-- **A judge sees** `{prompt, inputs, captured outputs, criteria}` in a fresh context,
-  against an engine-fixed verdict schema. No syntax could hand it the generator's
-  transcript.
+- **A judge sees** the gate criteria as its system instruction and deterministic
+  evidence containing the resolved generator prompt (including rendered scalar inputs
+  and repair feedback) plus the complete validated output object. Workspace refs and
+  the generator transcript are not included. Every judge receives identical bytes in
+  a fresh context against an engine-fixed verdict schema.
 - **Crash ≠ verdict.** A mechanical judge failure propagates; it never consumes an
   attempt and never reads as approval.
 - **Identity** = hash(step id, backend, model, prompt, resolved `outputs`, `expect`,
@@ -180,9 +182,14 @@ inputs:
 dbt) and ones that bite at 3am (GitHub Actions: a nonexistent property is the empty
 string).
 
-**Load time**, before a token is spent: the reference is exactly `<step>.<field>`; the
-step exists; the field is declared upstream or reserved; the graph is acyclic; judges
-are well-formed; an explicit quorum ∈ 1..N; `expect:` only on a tree-capturing backend.
+**Load time:** the reference is exactly `<step>.<field>`; the step exists; the field is
+declared upstream or reserved; the graph is acyclic; judges are well-formed; and an
+explicit quorum ∈ 1..N.
+
+**Preflight**, after concrete backends are available and before any invocation or token
+spend: every generator and judge resolves; `expect:` and reserved `workspace`/`diff`
+producers capture trees; workspace consumers can materialize them; required `--in`
+roots and requested `--redo` names exist.
 
 **Runtime**, after the agent returns and *before* the step commits: strict-parse, every
 declared field present, enum values members, **no undeclared fields**. Any failure
@@ -192,8 +199,9 @@ rejects the output whole — a stray key means the model improvised.
 ```
 invoke → capture tree + assert expect → validate → jury → commit
 ```
-A non-conforming candidate never reaches a judge. Neither does a step that failed to
-produce a declared path.
+A non-conforming candidate never reaches a judge. A missing declared path under a gate
+consumes an attempt, supplies path-specific repair feedback, and spends zero judge
+tokens for that attempt; ungated it fails the step. Other capture errors are mechanical.
 
 A **schema violation** is a third thing: not a crash (the process exited 0), not a
 verdict (no judge ran). The step fails; the retry is `dawn run` again, which re-pays one
@@ -203,10 +211,13 @@ step rather than the run.
 
 ## 4 · Artifacts
 
-The tree is the only artifact channel, and **producer path equals consumer path** —
-`dist/dawn` written by `build` is read at `dist/dawn` by `smoke`. Every tree-capturing step
-gets its own scratch dir: materialize inputs → run → capture → discard. The host
-filesystem is never touched.
+The workspace tree is the only current file/artifact channel, and **producer path equals
+consumer path** — `dist/dawn` written by `build` is read at `dist/dawn` by `smoke`.
+Declared paths are files forced into that captured workspace, not independent
+`artifact` refs. The public `KindArtifact` and `KindSession` names remain reserved for
+future backends; the current binary produces neither. Every tree-capturing step gets its
+own scratch dir: materialize inputs → run → capture → discard. The supplied host tree is
+captured first; agents work only in the scratch copy.
 
 `expect:` is a postcondition, and two lines of git give both halves:
 
@@ -214,6 +225,11 @@ filesystem is never touched.
 git add -A                  # everything; .gitignore honored
 git add -f -- <expect…>     # forced past .gitignore, and errors if never produced
 ```
+
+Every git subprocess uses a controlled configuration environment. System and personal
+configuration, including `core.autocrlf`, global excludes, ambient `GIT_CONFIG_*`
+overrides, and system attributes, cannot alter the captured bytes. The workspace's own
+`.gitignore` remains in force.
 
 Verified: with `dist/` ignored, plain `add -A` yields a tree where `dist/dawn`
 **does not exist** — the flagship artifact silently absent.
@@ -384,7 +400,7 @@ isolation-shaped fix.
 | `git worktree` | the consensus choice, and wrong here: it needs a shared mutable `.git`, puts a writable handle to the store inside the agent's cwd, and costs a full checkout. dawn's store is bare and its scratch is disposable |
 | hardlink trees / reflink / clonefile / overlayfs | copy is ~0.1% of a step's 30m bound, so there is nothing to optimize; each is one platform only, or a second dependency. Hardlinks additionally corrupt the original through the link |
 | containers | out of scope: single host, single static binary |
-| per-step `$HOME` / `CLAUDE_CONFIG_DIR` | the one genuinely uncovered vector, and it is env vars rather than a sandbox. Deferred with concurrency: relocating `HOME` logs the agent out, because that is where its credentials live |
+| per-step `$HOME` / `CLAUDE_CONFIG_DIR` | the one genuinely uncovered vector, and it is env vars rather than a sandbox. Deferred because relocating `HOME` logs the agent out, which is where its credentials live |
 | `confine:` `sandbox:` `dir:` keys | a plan key whose meaning depends on the host OS and kernel version. `--in DIR` already keeps host paths out of the plan's identity |
 
 ---
@@ -422,11 +438,10 @@ Exit `0` accepted · `1` **gate refused** · `2` usage/parse/validate · `3` mec
 `130` interrupted. Unattended means something reads `$?`, and the distinction nothing
 else gives you is *the panel refused* vs *the machine broke*.
 
-**SIGINT and SIGTERM cancel the run and reap the agent CLI's whole process group.**
-An orphaned agent keeps spending money on a run nobody is waiting for, so an interrupt
-that leaves one behind is a leak, not a shutdown. Shutdown is bounded: the group kill is
-the mechanism and a 5s wait on inherited pipes is the backstop, so there is no
-second-signal force-quit to get wrong.
+**SIGINT and SIGTERM cancel the run.** On Unix each agent is placed in its own process
+group and cancellation kills the whole group, including tool subprocesses. On non-Unix
+platforms cancellation kills only the direct child. On every platform a 5s `WaitDelay`
+bounds waiting for inherited pipes; process-group reaping is a Unix-only guarantee.
 
 An interrupt is **not a verdict**. Cancelling mid-gate cancels every judge at once, which
 is indistinguishable from a unanimous no by vote count alone; the judges' errors make the
@@ -434,16 +449,12 @@ round mechanical, so an interrupt never records a rejection and never spends a r
 attempt. It exits `130` even though the underlying error is mechanical, because *the
 operator stopped it* and *the machine broke* are different facts.
 
-**One `run` per state directory, enforced by an `flock`.** Two runs against one `--dir`
-corrupt nothing — journal lines are atomic appends and blobs are content-addressed — so
-the temptation is to allow them. They both miss the same key, both execute it, and both
-pay. That is what a cron does on the night a run overruns its own interval, and nothing
-in the output would tell you: the journal simply has two lines where you expected one.
-The second run is refused rather than queued, because an overrunning job should be told
-it is late, not stacked behind the run it is duplicating. `dawn show` never takes the
-lock — reading committed state is always safe. An `flock` rather than a pid file, so the
-kernel releases it when the process dies and there is no stale-lock heuristic to get
-wrong.
+**On Unix, one `run` per state directory is enforced by a non-blocking `flock`.** Two
+runs against one `--dir` corrupt nothing — journal lines are atomic appends and blobs are
+content-addressed — but they can both miss the same key, execute it, and pay. The second
+Unix run is refused rather than queued, and the kernel releases the lock when its process
+dies. `dawn show` never locks. Non-Unix builds compile, but their lock implementation is
+a no-op: concurrent runs are unguarded and can duplicate work and cost.
 
 ---
 
@@ -555,11 +566,13 @@ and a posture that dangerous should be a word an author typed.
 The code implements this spec. `dawn run` and `dawn show` work end to end: typed
 outputs with load-time reference checking, inputs resolved by kind, `expect:`,
 gates with quorum and bounded repair, the identity key, the append-only journal,
-`--redo`, `--in`, per-step scratch dirs, tree capture and materialize, stable
-prefixes, process-group timeouts, and the exit-code table.
+`--redo`, `--in`, `--jobs` step concurrency, per-step scratch dirs, deterministic tree
+capture and materialize, stable prefixes, Unix process-group cancellation, and the
+exit-code table. Run locking and process-group cancellation have the platform exceptions
+documented in the CLI section.
 
-Not yet: more backends than `claude` and `claude-ws` (codex, an HTTP LLM), and
-concurrency beyond the jury. Both slot behind existing seams.
+Not yet: more backends than `claude` and `claude-ws` (codex, an HTTP LLM). They slot
+behind existing seams.
 
 Honest gaps in what is built, none of them language-level:
 - `dawn show PLAN` prices a run in **calls**, not dollars, and everything past the
