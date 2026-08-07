@@ -59,6 +59,43 @@ func TestCaptureIsContentAddressedNotTimeAddressed(t *testing.T) {
 	}
 }
 
+func TestCaptureNormalizesExecBit(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	capture := func(mode os.FileMode) string {
+		dir := t.TempDir()
+		path := writeFile(t, dir, "tool", "#!/bin/sh\nexit 0\n")
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		ref, err := tr.Capture(ctx, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ref
+	}
+
+	ref755 := capture(0o755)
+	ref775 := capture(0o775)
+	if ref755 != ref775 {
+		t.Fatalf("unsupported mode distinction changed ref: %s != %s", ref755, ref775)
+	}
+
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, ref755, dst); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dst, "tool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("materialized mode %o lost owner executable bit", info.Mode().Perm())
+	}
+	if info.Mode().Perm()&0o020 != 0 {
+		t.Fatalf("materialized mode %o retained unsupported group-write bit", info.Mode().Perm())
+	}
+}
+
 func TestCaptureMaterializeRoundTrip(t *testing.T) {
 	tr, ctx := trees(t), context.Background()
 	src := t.TempDir()

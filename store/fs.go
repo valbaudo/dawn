@@ -12,14 +12,49 @@ import (
 // atomic (temp file + rename), so a crash mid-Put never leaves a partial blob
 // under its final name. This is the whole "resume after a crash" story: a new
 // process opening the same directory reads back every committed ref.
-type FS struct{ root string }
+type FS struct {
+	root string
+	ops  fsOps
+}
+
+type tempFile interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+	Name() string
+}
+
+type fsOps struct {
+	createTemp func(string, string) (tempFile, error)
+	rename     func(string, string) error
+	remove     func(string) error
+}
+
+func (ops fsOps) withDefaults() fsOps {
+	if ops.createTemp == nil {
+		ops.createTemp = func(dir, pattern string) (tempFile, error) {
+			return os.CreateTemp(dir, pattern)
+		}
+	}
+	if ops.rename == nil {
+		ops.rename = os.Rename
+	}
+	if ops.remove == nil {
+		ops.remove = os.Remove
+	}
+	return ops
+}
+
+func newFS(root string, ops fsOps) *FS {
+	return &FS{root: root, ops: ops.withDefaults()}
+}
 
 // NewFS opens (creating if needed) a content-addressed store rooted at dir.
 func NewFS(dir string) (*FS, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("store: mkdir %s: %w", dir, err)
 	}
-	return &FS{root: dir}, nil
+	return newFS(dir, fsOps{}), nil
 }
 
 // ponytail: flat directory keyed by full hash. Shard by hash prefix only if a
@@ -38,14 +73,15 @@ func (b *FS) Put(content []byte) (string, error) {
 	if _, err := os.Stat(path); err == nil {
 		return ref, nil // already stored
 	}
-	tmp, err := os.CreateTemp(b.root, ".tmp-*")
+	ops := b.ops.withDefaults()
+	tmp, err := ops.createTemp(b.root, ".tmp-*")
 	if err != nil {
 		return "", fmt.Errorf("store: temp: %w", err)
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(content); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		_ = ops.remove(tmpName)
 		return "", fmt.Errorf("store: write: %w", err)
 	}
 	// Flush to disk BEFORE the rename. Without this the rename can land while
@@ -53,15 +89,15 @@ func (b *FS) Put(content []byte) (string, error) {
 	// correctly-named file full of zeros — a committed ref pointing at nothing.
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		_ = ops.remove(tmpName)
 		return "", fmt.Errorf("store: sync: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
+		_ = ops.remove(tmpName)
 		return "", fmt.Errorf("store: close: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
+	if err := ops.rename(tmpName, path); err != nil {
+		_ = ops.remove(tmpName)
 		return "", fmt.Errorf("store: commit: %w", err)
 	}
 	// And fsync the directory, so the rename itself survives a power loss.

@@ -1,10 +1,78 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestMemRejectsMalformedAndMissingRefs(t *testing.T) {
+	b := NewMem()
+	if _, err := b.Get("not-a-ref"); err == nil || !strings.Contains(err.Error(), "malformed ref") {
+		t.Fatalf("Get malformed ref error = %v, want malformed ref", err)
+	}
+	if _, err := b.Get(Ref([]byte("never stored"))); err == nil || !strings.Contains(err.Error(), "ref not found") {
+		t.Fatalf("Get missing ref error = %v, want ref not found", err)
+	}
+}
+
+func TestMemDefensiveCopies(t *testing.T) {
+	b := NewMem()
+	input := []byte("hello")
+	ref, err := b.Put(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input[0] = 'j'
+
+	got, err := b.Get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("stored bytes changed with input: got %q", got)
+	}
+	got[0] = 'j'
+	gotAgain, err := b.Get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotAgain) != "hello" {
+		t.Fatalf("stored bytes changed with Get result: got %q", gotAgain)
+	}
+}
+
+func TestMemZeroValue(t *testing.T) {
+	var b Mem
+	ref, err := b.Put([]byte("zero value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.Get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "zero value" {
+		t.Fatalf("got %q, want zero value", got)
+	}
+}
+
+func TestFSZeroOpsUseDefaults(t *testing.T) {
+	b := &FS{root: t.TempDir()}
+	ref, err := b.Put([]byte("default operations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.Get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "default operations" {
+		t.Fatalf("got %q, want default operations", got)
+	}
+}
 
 func TestFSRoundTrip(t *testing.T) {
 	b, err := NewFS(t.TempDir())
@@ -72,5 +140,101 @@ func TestFSDetectsCorruption(t *testing.T) {
 	}
 	if _, err := b.Get(ref); err == nil {
 		t.Fatal("Get of a corrupted blob must error, not return the wrong bytes")
+	}
+}
+
+type failingTempFile struct {
+	*os.File
+	fail string
+}
+
+func (f *failingTempFile) Write(p []byte) (int, error) {
+	if f.fail == "write" {
+		return 0, errors.New("injected write failure")
+	}
+	return f.File.Write(p)
+}
+
+func (f *failingTempFile) Sync() error {
+	if f.fail == "sync" {
+		return errors.New("injected sync failure")
+	}
+	return f.File.Sync()
+}
+
+func (f *failingTempFile) Close() error {
+	err := f.File.Close()
+	if f.fail == "close" {
+		return errors.New("injected close failure")
+	}
+	return err
+}
+
+func TestFSPutFailureCleansUp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+		ops  func(*testing.T) fsOps
+	}{
+		{
+			name: "write",
+			want: "store: write",
+			ops: func(t *testing.T) fsOps {
+				return fsOps{createTemp: failingCreateTemp(t, "write")}
+			},
+		},
+		{
+			name: "sync",
+			want: "store: sync",
+			ops: func(t *testing.T) fsOps {
+				return fsOps{createTemp: failingCreateTemp(t, "sync")}
+			},
+		},
+		{
+			name: "close",
+			want: "store: close",
+			ops: func(t *testing.T) fsOps {
+				return fsOps{createTemp: failingCreateTemp(t, "close")}
+			},
+		},
+		{
+			name: "rename",
+			want: "store: commit",
+			ops: func(*testing.T) fsOps {
+				return fsOps{rename: func(string, string) error {
+					return errors.New("injected rename failure")
+				}}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			b := newFS(dir, tc.ops(t))
+			content := []byte("never committed")
+			if _, err := b.Put(content); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Put error = %v, want %q", err, tc.want)
+			}
+			if _, err := os.Stat(filepath.Join(dir, strings.TrimPrefix(Ref(content), "sha256:"))); !os.IsNotExist(err) {
+				t.Fatalf("final blob exists after failure: %v", err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("temporary files remain after failure: %v", entries)
+			}
+		})
+	}
+}
+
+func failingCreateTemp(t *testing.T, fail string) func(string, string) (tempFile, error) {
+	t.Helper()
+	return func(dir, pattern string) (tempFile, error) {
+		f, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		return &failingTempFile{File: f, fail: fail}, nil
 	}
 }

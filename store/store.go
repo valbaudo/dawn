@@ -47,6 +47,9 @@ func (b *Mem) Put(content []byte) (string, error) {
 	ref := Ref(content)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.m == nil {
+		b.m = make(map[string][]byte)
+	}
 	if _, ok := b.m[ref]; !ok {
 		cp := make([]byte, len(content))
 		copy(cp, content)
