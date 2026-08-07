@@ -166,6 +166,93 @@ func TestCaptureHonorsGitignore(t *testing.T) {
 	}
 }
 
+func TestCaptureIgnoresPersonalAutocrlf(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	clean, hostile := t.TempDir(), t.TempDir()
+	writeFile(t, clean, "a.txt", "line one\r\nline two\r\n")
+	writeFile(t, hostile, "a.txt", "line one\r\nline two\r\n")
+
+	cleanRef, err := tr.Capture(ctx, clean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	global := writeFile(t, t.TempDir(), "gitconfig", "[core]\n\tautocrlf = true\n")
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	hostileRef, err := tr.Capture(ctx, hostile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostileRef != cleanRef {
+		t.Fatalf("personal core.autocrlf changed capture: %s != %s", hostileRef, cleanRef)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, hostileRef, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "line one\r\nline two\r\n"; string(got) != want {
+		t.Fatalf("materialized bytes = %q, want %q", got, want)
+	}
+}
+
+func TestCaptureIgnoresPersonalExcludesFile(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	clean, hostile := t.TempDir(), t.TempDir()
+	writeFile(t, clean, "keep.txt", "keep\n")
+	writeFile(t, hostile, "keep.txt", "keep\n")
+
+	cleanRef, err := tr.Capture(ctx, clean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	excludes := writeFile(t, t.TempDir(), "excludes", "keep.txt\n")
+	global := writeFile(t, t.TempDir(), "gitconfig", "[core]\n\texcludesFile = "+excludes+"\n")
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	hostileRef, err := tr.Capture(ctx, hostile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostileRef != cleanRef {
+		t.Fatalf("personal core.excludesFile changed capture: %s != %s", hostileRef, cleanRef)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, hostileRef, dst); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dst, "keep.txt")); err != nil || string(got) != "keep\n" {
+		t.Fatalf("keep.txt was excluded: %q (%v)", got, err)
+	}
+}
+
+func TestCaptureIgnoresCommandScopeGitConfig(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	clean, hostile := t.TempDir(), t.TempDir()
+	for _, dir := range []string{clean, hostile} {
+		writeFile(t, dir, "keep.txt", "keep\r\n")
+	}
+	cleanRef, err := tr.Capture(ctx, clean)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	excludes := writeFile(t, t.TempDir(), "excludes", "keep.txt\n")
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
+	t.Setenv("GIT_CONFIG_VALUE_0", "true")
+	t.Setenv("GIT_CONFIG_KEY_1", "core.excludesFile")
+	t.Setenv("GIT_CONFIG_VALUE_1", excludes)
+	hostileRef, err := tr.Capture(ctx, hostile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostileRef != cleanRef {
+		t.Fatalf("command-scope Git config changed capture: %s != %s", hostileRef, cleanRef)
+	}
+}
+
 // A working dir that is itself a git repo must not leak its .git into the tree.
 func TestCaptureIgnoresNestedGitDir(t *testing.T) {
 	tr, ctx := trees(t), context.Background()

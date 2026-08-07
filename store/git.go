@@ -300,7 +300,25 @@ func (t *Trees) tempIndex() (path string, done func(), err error) {
 }
 
 func (t *Trees) env(workTree, index string) []string {
-	env := append(os.Environ(), "GIT_DIR="+t.gitDir)
+	ambient := os.Environ()
+	env := make([]string, 0, len(ambient)+11)
+	for _, entry := range ambient {
+		if strings.HasPrefix(entry, "GIT_CONFIG_") || strings.HasPrefix(entry, "GIT_ATTR_NOSYSTEM=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_ATTR_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=core.autocrlf",
+		"GIT_CONFIG_VALUE_0=false",
+		"GIT_CONFIG_KEY_1=core.excludesFile",
+		"GIT_CONFIG_VALUE_1="+os.DevNull,
+		"GIT_DIR="+t.gitDir,
+	)
 	if workTree != "" {
 		// ABSOLUTE. The command also runs with cmd.Dir = workTree, so a relative
 		// GIT_WORK_TREE would be resolved a second time against it —
