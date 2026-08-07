@@ -11,6 +11,40 @@ import (
 	"github.com/valbaudo/dawn/store"
 )
 
+func TestWorkspaceStablePrefixFlag(t *testing.T) {
+	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "cas"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base, err := trees.Capture(context.Background(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	argvPath := filepath.Join(t.TempDir(), "argv")
+	t.Setenv("DAWN_TEST_ARGV", argvPath)
+	bin := fakeCLI(t, `printf '%s\000' "$@" > "$DAWN_TEST_ARGV"
+ echo '{"type":"result","is_error":false,"result":"done","usage":{}}'`)
+	_, err = (Workspace{Model: "haiku", Bin: bin, Trees: trees}).Invoke(context.Background(), dawn.Invocation{
+		Prompt: "inspect it",
+		Inputs: map[string]dawn.Ref{"repo": {Kind: dawn.KindWorkspace, URI: base}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := readArgv(t, argvPath)
+	for _, arg := range args {
+		if arg == "--exclude-dynamic-system-prompt-sections" {
+			return
+		}
+	}
+	t.Fatalf("argv does not contain --exclude-dynamic-system-prompt-sections: %q", args)
+}
+
 // The loader refuses two workspace inputs before a token is spent, but the check
 // is repeated at the backend because that is where every caller routes — a
 // backend used directly has no plan in front of it. Ranging the map and taking

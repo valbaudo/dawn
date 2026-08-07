@@ -40,10 +40,14 @@ import (
 // writes wherever the uid can. Point Workspace only at a tree you are willing to
 // let the agent change.
 type Workspace struct {
-	Model   string        // default model; an Invocation may override
-	Bin     string        // defaults to "claude"
-	Timeout time.Duration // 0 => DefaultTimeout
-	Trees   *store.Trees  // required: where trees are captured and materialized
+	// Model is the default model; an invocation may override it.
+	Model string
+	// Bin is the CLI binary and defaults to "claude" on PATH.
+	Bin string
+	// Timeout bounds one invocation; zero selects DefaultTimeout.
+	Timeout time.Duration
+	// Trees is the required tree store used to capture and materialize workspaces.
+	Trees *store.Trees
 }
 
 // Name reports the backend and its default model, e.g. "claude-ws:sonnet".
@@ -113,8 +117,7 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 	// "improves cross-user prompt-cache reuse"; it is ignored with --system-prompt,
 	// which is why the two backends take different routes to the same property.
 	cmd := proc.Command(ctx, bin, "-p", prompt, "--model", model,
-		"--output-format", "json", "--dangerously-skip-permissions",
-		"--exclude-dynamic-system-prompt-sections",
+		"--output-format", "json", "--dangerously-skip-permissions", "--exclude-dynamic-system-prompt-sections",
 		"--no-session-persistence")
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer

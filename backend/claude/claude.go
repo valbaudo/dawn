@@ -17,26 +17,24 @@ import (
 	"github.com/valbaudo/dawn/proc"
 )
 
+// DefaultTimeout bounds one invocation when a backend does not provide a
+// tighter timeout. proc.Command kills the whole process group when it expires.
+const DefaultTimeout = 30 * time.Minute
+
 // defaultSystem is the stable system prompt used when an Invocation declares
 // none. It must contain nothing per-machine and nothing per-run — no paths, no
 // timestamps, no ids — or it stops being a cacheable prefix.
-// DefaultTimeout bounds ONE invocation. Unattended means nobody is watching, and a
-// hung tool call with no deadline is indistinguishable from slow work — it just
-// burns the night. proc.Command already kills the whole process group on cancel;
-// this is what finally drives it. A field rather than a constant so a caller can
-// tighten it, zero meaning the default.
-const DefaultTimeout = 30 * time.Minute
-
 const defaultSystem = "You are a precise assistant. Follow the instructions exactly " +
 	"and return only what is asked for."
 
-// Backend runs one `claude -p --model <model> --output-format json` call. Model
-// is the default model ("haiku"|"sonnet"|"opus"|a full id); an Invocation may
-// override it per call. Bin overrides the binary name for tests.
+// Backend runs one `claude -p --model <model> --output-format json` call.
 type Backend struct {
-	Model   string
-	Bin     string        // defaults to "claude" on PATH
-	Timeout time.Duration // 0 => DefaultTimeout
+	// Model is the default model; an invocation may override it.
+	Model string
+	// Bin is the CLI binary and defaults to "claude" on PATH.
+	Bin string
+	// Timeout bounds one invocation; zero selects DefaultTimeout.
+	Timeout time.Duration
 }
 
 // Name reports the backend and its default model, e.g. "claude:opus".
@@ -99,8 +97,7 @@ func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, e
 	// a timeout would hang instead of firing.
 	cmd := proc.Command(ctx, bin, "-p", prompt,
 		"--model", model,
-		"--output-format", "json",
-		"--system-prompt", system,
+		"--output-format", "json", "--system-prompt", system,
 		// dawn never resumes a session, so persisting one per invocation only
 		// litters ~/.claude/projects with a directory per call.
 		"--no-session-persistence")

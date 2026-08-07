@@ -78,6 +78,37 @@ func fakeCLI(t *testing.T, script string) string {
 	return p
 }
 
+func readArgv(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 || data[len(data)-1] != 0 {
+		t.Fatalf("recorded argv is not NUL-terminated: %q", data)
+	}
+	return strings.Split(string(data[:len(data)-1]), "\x00")
+}
+
+func TestBackendStablePrefixFlag(t *testing.T) {
+	argvPath := filepath.Join(t.TempDir(), "argv")
+	t.Setenv("DAWN_TEST_ARGV", argvPath)
+	bin := fakeCLI(t, `printf '%s\000' "$@" > "$DAWN_TEST_ARGV"
+ echo '{"type":"result","is_error":false,"result":"pong","usage":{}}'`)
+
+	_, err := (Backend{Model: "haiku", Bin: bin}).Invoke(context.Background(), dawn.Invocation{Prompt: "ping"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := readArgv(t, argvPath)
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--system-prompt" && args[i+1] == defaultSystem {
+			return
+		}
+	}
+	t.Fatalf("argv does not contain --system-prompt followed by the stable default: %q", args)
+}
+
 // Unattended plus no deadline means a hung tool call burns the night looking like
 // slow work. Every invocation is bounded, and because proc.Command runs the child
 // in its own process group, a grandchild holding stdout cannot keep it alive past
