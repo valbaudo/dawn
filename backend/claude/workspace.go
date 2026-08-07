@@ -194,7 +194,11 @@ func workspaceInput(inputs map[string]dawn.Ref) (dawn.Ref, error) {
 // CapturesTree marks Workspace as able to honor Invocation.Expect.
 func (Workspace) CapturesTree() {}
 
+// MaterializesWorkspace marks Workspace as able to consume a workspace input.
+func (Workspace) MaterializesWorkspace() {}
+
 var (
-	_ dawn.Backend      = Workspace{}
-	_ dawn.TreeCapturer = Workspace{}
+	_ dawn.Backend               = Workspace{}
+	_ dawn.TreeCapturer          = Workspace{}
+	_ dawn.WorkspaceMaterializer = Workspace{}
 )

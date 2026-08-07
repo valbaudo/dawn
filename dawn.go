@@ -60,6 +60,13 @@ type TreeCapturer interface {
 	CapturesTree()
 }
 
+// WorkspaceMaterializer is an optional [Backend] interface: a backend that can
+// turn a workspace ref in [Invocation.Inputs] into the directory it runs in.
+type WorkspaceMaterializer interface {
+	Backend
+	MaterializesWorkspace()
+}
+
 // Result is what one invocation produced. Committing it to a store (and the
 // [Ref]s that yields) is the caller's job — see the store package. That
 // separation is why "durable resume" falls out of correct commits rather than

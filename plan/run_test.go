@@ -42,7 +42,7 @@ func TestRefInputsTravelAsRefs(t *testing.T) {
 		"first":  {Agent: "x/gen", Prompt: "make it", Outputs: map[string]Type{"text": {}, "note": {}}},
 		"second": {Agent: "x/gen", Prompt: "use it", Inputs: map[string]string{"repo": "first.workspace", "note": "first.note"}},
 	}}
-	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{"gen": producer{seen: &seen}})}
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{"gen": workspaceConsumer{producer{seen: &seen}}})}
 	if _, err := r.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +173,93 @@ func TestCommitsTheApprovedAttemptNotTheLast(t *testing.T) {
 	}
 }
 
+type textProducer struct{ calls *int }
+
+func (p textProducer) Name() string { return "text-producer" }
+func (p textProducer) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	*p.calls++
+	return dawn.Result{Output: conform(in, in.Prompt)}, nil
+}
+
+type treeProducer struct{ producer }
+
+func (treeProducer) CapturesTree() {}
+
+type workspaceConsumer struct{ producer }
+
+func (workspaceConsumer) MaterializesWorkspace() {}
+
+func TestPreflightRejectsReservedRefsFromNonTreeBackend(t *testing.T) {
+	for _, field := range []string{"workspace", "diff"} {
+		t.Run(field, func(t *testing.T) {
+			var calls int
+			p := &Plan{Steps: map[string]Step{
+				"upstream": {Agent: "x/text", Prompt: "produce", Outputs: map[string]Type{"text": {}}},
+				"downstream": {
+					Agent: "x/text", Prompt: "consume",
+					Inputs: map[string]string{"repo": "upstream." + field},
+				},
+			}}
+			r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+				"text": textProducer{calls: &calls},
+			})}
+
+			_, err := r.Run(context.Background(), p)
+			if err == nil || !strings.Contains(err.Error(), "upstream") ||
+				!strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), "captures no tree") {
+				t.Fatalf("expected reserved ref preflight rejection, got: %v", err)
+			}
+			if calls != 0 {
+				t.Fatalf("preflight must precede execution, but %d invocations ran", calls)
+			}
+		})
+	}
+}
+
+func TestPreflightRejectsWorkspaceInputForNonMaterializingBackend(t *testing.T) {
+	var calls int
+	p := &Plan{Steps: map[string]Step{
+		"upstream": {Agent: "x/tree", Prompt: "produce"},
+		"downstream": {
+			Agent: "x/text", Prompt: "consume",
+			Inputs: map[string]string{"repo": "upstream.workspace"},
+		},
+	}}
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"tree": treeProducer{}, "text": textProducer{calls: &calls},
+	})}
+
+	_, err := r.Run(context.Background(), p)
+	if err == nil || !strings.Contains(err.Error(), "downstream") ||
+		!strings.Contains(err.Error(), "repo") || !strings.Contains(err.Error(), "cannot materialize a workspace") {
+		t.Fatalf("expected workspace consumer preflight rejection, got: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("preflight must precede execution, but %d invocations ran", calls)
+	}
+}
+
+func TestPreflightAcceptsTreeProducerAndWorkspaceConsumer(t *testing.T) {
+	var seen []dawn.Invocation
+	p := &Plan{Steps: map[string]Step{
+		"upstream": {Agent: "x/tree", Prompt: "produce"},
+		"downstream": {
+			Agent: "x/workspace", Prompt: "consume",
+			Inputs: map[string]string{"repo": "upstream.workspace"},
+		},
+	}}
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"tree": treeProducer{}, "workspace": workspaceConsumer{producer{seen: &seen}},
+	})}
+
+	if _, err := r.Run(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("expected the workspace consumer to run once, got %d", len(seen))
+	}
+}
+
 // `expect:` is a postcondition on a captured tree, so a text-only agent has
 // nothing to assert against — and the check runs before ANYTHING executes.
 func TestExpectRequiresATreeCapturingBackend(t *testing.T) {
@@ -211,7 +298,7 @@ func TestRootStepSuppliesAWorkspace(t *testing.T) {
 		"a": {Agent: "x/gen", Prompt: "p", Inputs: map[string]string{"repo": "in.workspace"}},
 	}}
 	root := dawn.Ref{Kind: dawn.KindWorkspace, URI: "tree-root"}
-	r := &Runner{Blobs: store.NewMem(), Root: &root, Backend: byModel(map[string]dawn.Backend{"gen": producer{seen: &seen}})}
+	r := &Runner{Blobs: store.NewMem(), Root: &root, Backend: byModel(map[string]dawn.Backend{"gen": workspaceConsumer{producer{seen: &seen}}})}
 	if _, err := r.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}

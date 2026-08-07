@@ -46,6 +46,15 @@ func (e *RejectedError) Error() string {
 	return fmt.Sprintf("gate refused after %d attempt(s): %s", e.Attempts, e.Objections)
 }
 
+// ValidationError reports a plan author or backend configuration error found
+// before status lookup or execution begins.
+type ValidationError struct {
+	Err error
+}
+
+func (e *ValidationError) Error() string { return e.Err.Error() }
+func (e *ValidationError) Unwrap() error { return e.Err }
+
 // Runner executes a Plan. Backend maps an agent spec to a concrete dawn.Backend, so
 // the runner stays backend-agnostic.
 type Runner struct {
@@ -70,26 +79,8 @@ func (r *Runner) Run(ctx context.Context, p *Plan) (map[string]StepResult, error
 	if err != nil {
 		return nil, err
 	}
-	// Preflight, over EVERY step before any of them runs, so an author mistake
-	// costs nothing rather than surfacing halfway through a paid pipeline.
-	for _, id := range p.IDs() {
-		s := p.Steps[id]
-		for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
-			if did, _, _ := ParseRef(s.Inputs[name]); did == RootStep && r.Root == nil {
-				return nil, fmt.Errorf("step %q input %q references %s.workspace but no --in was given",
-					id, name, RootStep)
-			}
-		}
-		if len(s.Expect) == 0 {
-			continue
-		}
-		b, err := r.backendFor(s)
-		if err != nil {
-			return nil, fmt.Errorf("step %q: %w", id, err)
-		}
-		if _, ok := b.(dawn.TreeCapturer); !ok {
-			return nil, fmt.Errorf("step %q declares expect: but agent %q captures no tree", id, s.Agent)
-		}
+	if err := r.preflight(p); err != nil {
+		return nil, err
 	}
 
 	// EVERYTHING that mutates run state, and everything that WRITES it, happens in
@@ -357,6 +348,76 @@ func (r *Runner) bind(s Step, done map[string]StepResult) (bound, error) {
 	return b, nil
 }
 
+// preflight resolves every configured backend and verifies that reserved tree
+// flows match the optional capabilities at both ends before any external state is
+// read or an invocation starts.
+func (r *Runner) preflight(p *Plan) (err error) {
+	defer func() {
+		if err != nil {
+			err = &ValidationError{Err: err}
+		}
+	}()
+
+	backends := make(map[string]dawn.Backend, len(p.Steps))
+	for _, id := range p.IDs() {
+		s := p.Steps[id]
+		b, err := r.backendFor(s)
+		if err != nil {
+			return fmt.Errorf("step %q: %w", id, err)
+		}
+		backends[id] = b
+
+		if len(s.Expect) > 0 {
+			if _, ok := b.(dawn.TreeCapturer); !ok {
+				return fmt.Errorf("step %q declares expect: but agent %q captures no tree", id, s.Agent)
+			}
+		}
+		if s.Gate != nil {
+			for _, spec := range s.Gate.Judges {
+				a, err := ParseAgent(spec)
+				if err != nil {
+					return fmt.Errorf("step %q gate judge %q: %w", id, spec, err)
+				}
+				if _, err := r.Backend(a); err != nil {
+					return fmt.Errorf("step %q gate judge %q: %w", id, spec, err)
+				}
+			}
+		}
+	}
+
+	for _, id := range p.IDs() {
+		s := p.Steps[id]
+		consumer := backends[id]
+		for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
+			did, field, err := ParseRef(s.Inputs[name])
+			if err != nil {
+				return fmt.Errorf("step %q input %q: %w", id, name, err)
+			}
+			if did == RootStep && r.Root == nil {
+				return fmt.Errorf("step %q input %q references %s.workspace but no --in was given",
+					id, name, RootStep)
+			}
+			if field != "workspace" && field != "diff" {
+				continue
+			}
+			if did != RootStep {
+				producer := backends[did]
+				if _, ok := producer.(dawn.TreeCapturer); !ok {
+					return fmt.Errorf("step %q input %q references %s.%s, but upstream agent %q captures no tree",
+						id, name, did, field, p.Steps[did].Agent)
+				}
+			}
+			if field == "workspace" {
+				if _, ok := consumer.(dawn.WorkspaceMaterializer); !ok {
+					return fmt.Errorf("step %q input %q references a workspace, but agent %q cannot materialize a workspace",
+						id, name, s.Agent)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // backendFor constructs the backend named by a step's agent string.
 func (r *Runner) backendFor(s Step) (dawn.Backend, error) {
 	a, err := ParseAgent(s.Agent)
@@ -535,6 +596,9 @@ type StepStatus struct {
 func (r *Runner) Status(p *Plan) ([]StepStatus, error) {
 	order, err := p.order()
 	if err != nil {
+		return nil, err
+	}
+	if err := r.preflight(p); err != nil {
 		return nil, err
 	}
 	done := map[string]StepResult{}
