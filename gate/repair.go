@@ -22,13 +22,6 @@ type Candidate struct {
 // Text is a Candidate with no artifacts, for generators that only produce prose.
 func Text(s string) Candidate { return Candidate{Text: s} }
 
-// FromResult builds a Candidate from an invocation, reading the jury's rendering
-// from the named output field and carrying that invocation's produced refs.
-func FromResult(res dawn.Result, field string) Candidate {
-	s, _ := res.Output[field].(string)
-	return Candidate{Text: s, Produced: res.Produced}
-}
-
 // Generate produces a candidate for evaluation. feedback is the aggregated
 // critique from the previous rejected attempt ("" on the first attempt); the
 // closure decides how to fold it into the next generation. A Generate that

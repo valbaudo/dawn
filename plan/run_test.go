@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -100,6 +101,141 @@ func panel(judges map[string]dawn.Backend) func(Agent) (dawn.Backend, error) {
 	judges["gen"] = producer{}
 	return byModel(judges)
 }
+
+type fixedGenerator struct {
+	output   map[string]any
+	produced map[string]dawn.Ref
+}
+
+func (g fixedGenerator) Name() string           { return "fixed-generator" }
+func (g fixedGenerator) CapturesTree()          {}
+func (g fixedGenerator) MaterializesWorkspace() {}
+func (g fixedGenerator) Invoke(context.Context, dawn.Invocation) (dawn.Result, error) {
+	return dawn.Result{Output: g.output, Produced: g.produced}, nil
+}
+
+type recordingJudge struct {
+	mu          sync.Mutex
+	invocations []dawn.Invocation
+	approveAt   int
+}
+
+func (j *recordingJudge) Name() string { return "recording-judge" }
+func (j *recordingJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.invocations = append(j.invocations, in)
+	approved := j.approveAt == 0 || len(j.invocations) >= j.approveAt
+	return dawn.Result{Output: map[string]any{"approved": approved, "reason": "make it concise"}}, nil
+}
+
+func (j *recordingJudge) calls() []dawn.Invocation {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]dawn.Invocation(nil), j.invocations...)
+}
+
+func judgeEvidencePlan() *Plan {
+	return &Plan{Steps: map[string]Step{
+		"first": {
+			Agent: "x/first", Prompt: "Write the draft", Outputs: map[string]Type{"text": {}},
+		},
+		"second": {
+			Agent: "x/second", Prompt: "Review the draft",
+			Inputs:  map[string]string{"draft": "first.text", "repo": "first.workspace"},
+			Outputs: map[string]Type{"summary": {}, "alpha": {}},
+			Gate:    &Gate{Judges: []string{"x/judge"}, Criteria: "Approve concise summaries"},
+		},
+	}}
+}
+
+func TestJudgeReceivesCompleteGeneratorEvidence(t *testing.T) {
+	judge := &recordingJudge{}
+	secretURI := "workspace://must-not-leak"
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"first": fixedGenerator{
+			output:   map[string]any{"text": "draft body"},
+			produced: map[string]dawn.Ref{"workspace": {Kind: dawn.KindWorkspace, URI: secretURI}},
+		},
+		"second": fixedGenerator{output: map[string]any{"summary": "ok", "alpha": "first"}},
+		"judge":  judge,
+	})}
+	if _, err := r.Run(context.Background(), judgeEvidencePlan()); err != nil {
+		t.Fatal(err)
+	}
+	calls := judge.calls()
+	if len(calls) != 1 {
+		t.Fatalf("judge calls = %d, want 1", len(calls))
+	}
+	got := calls[0]
+	if got.System != "Approve concise summaries" {
+		t.Fatalf("judge system = %q, want criteria", got.System)
+	}
+	for _, want := range []string{
+		"Generator request:\nReview the draft",
+		"--- input: draft ---\ndraft body",
+		"Captured output:\n{",
+		`"summary": "ok"`,
+	} {
+		if !strings.Contains(got.Prompt, want) {
+			t.Errorf("judge prompt missing %q:\n%s", want, got.Prompt)
+		}
+	}
+	if strings.Contains(got.Prompt, secretURI) {
+		t.Fatalf("workspace URI leaked into textual evidence:\n%s", got.Prompt)
+	}
+}
+
+func TestJudgeEvidenceIsStable(t *testing.T) {
+	var first string
+	for i := 0; i < 50; i++ {
+		judge := &recordingJudge{}
+		output := map[string]any{"summary": "ok", "alpha": "first"}
+		r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+			"first": fixedGenerator{output: map[string]any{"text": "draft body"}, produced: map[string]dawn.Ref{
+				"workspace": {Kind: dawn.KindWorkspace, URI: "workspace://must-not-leak"},
+			}},
+			"second": fixedGenerator{output: output},
+			"judge":  judge,
+		})}
+		if _, err := r.Run(context.Background(), judgeEvidencePlan()); err != nil {
+			t.Fatal(err)
+		}
+		got := judge.calls()[0].Prompt
+		if i == 0 {
+			first = got
+			continue
+		}
+		if got != first {
+			t.Fatalf("judge evidence on run %d differs from run 0\nfirst:\n%s\nrun %d:\n%s", i, first, i, got)
+		}
+	}
+}
+
+func TestJudgeEvidenceIncludesRepairFeedback(t *testing.T) {
+	judge := &recordingJudge{approveAt: 2}
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"gen": producer{}, "judge": judge,
+	})}
+	p := gated(&Gate{Judges: []string{"x/judge"}, Criteria: "be concise"})
+	if _, err := r.Run(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	calls := judge.calls()
+	if len(calls) != 2 {
+		t.Fatalf("judge calls = %d, want 2", len(calls))
+	}
+	for _, want := range []string{"Generator request:\nwrite", rejectionHeadingForTest, "make it concise"} {
+		if !strings.Contains(calls[1].Prompt, want) {
+			t.Errorf("repaired evidence missing %q:\n%s", want, calls[1].Prompt)
+		}
+	}
+	if !strings.HasPrefix(calls[1].Prompt, "Generator request:\nwrite") {
+		t.Fatalf("repair changed stable evidence prefix:\n%s", calls[1].Prompt)
+	}
+}
+
+const rejectionHeadingForTest = "A prior version was REJECTED by the review panel. Address every objection:"
 
 func TestGatedStepPasses(t *testing.T) {
 	r := &Runner{Blobs: store.NewMem(), Backend: panel(map[string]dawn.Backend{

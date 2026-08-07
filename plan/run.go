@@ -510,13 +510,14 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.B
 			return gate.Candidate{}, err
 		}
 		generated = append(generated, res)
-		// The jury reads the whole validated object, which deletes the question of
-		// which field the judges are looking at.
-		text, err := json.MarshalIndent(res.Output, "", "  ")
+		// The jury receives the exact resolved generator request (scalar inputs and
+		// any appended repair feedback) followed by the whole validated output. Refs
+		// stay in Invocation.Inputs and must never leak into this textual evidence.
+		text, err := judgeEvidence(attempt.Prompt, res.Output)
 		if err != nil {
 			return gate.Candidate{}, err
 		}
-		return gate.Candidate{Text: string(text), Produced: res.Produced}, nil
+		return gate.Candidate{Text: text, Produced: res.Produced}, nil
 	}
 
 	out, err := gate.Gate(ctx, gen, judges, g.Criteria, quorum, Attempts)
@@ -538,6 +539,17 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.B
 	}
 	r.logf("     gate passed on attempt %d", out.Attempts)
 	return generated[out.Attempts-1], nil
+}
+
+// judgeEvidence renders one complete, deterministic account of what the
+// generator was asked and the validated object it returned. MarshalIndent sorts
+// map keys, keeping repeated jury calls byte-identical.
+func judgeEvidence(prompt string, output map[string]any) (string, error) {
+	body, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return "Generator request:\n" + prompt + "\n\nCaptured output:\n" + string(body), nil
 }
 
 // objections summarizes why a panel refused, for the step's error and its journal

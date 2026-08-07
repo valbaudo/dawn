@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/valbaudo/dawn"
@@ -22,6 +23,38 @@ func (f fakeJudge) Invoke(context.Context, dawn.Invocation) (dawn.Result, error)
 		return dawn.Result{}, f.err
 	}
 	return dawn.Result{Output: map[string]any{"approved": f.approved, "reason": "test"}}, nil
+}
+
+type recordingFakeJudge struct {
+	name string
+	mu   sync.Mutex
+	seen []dawn.Invocation
+}
+
+func (f *recordingFakeJudge) Name() string { return f.name }
+func (f *recordingFakeJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seen = append(f.seen, in)
+	return dawn.Result{Output: map[string]any{"approved": true}}, nil
+}
+
+func TestJuryGivesEachJudgeIndependentIdenticalEvidence(t *testing.T) {
+	a := &recordingFakeJudge{name: "a"}
+	b := &recordingFakeJudge{name: "b"}
+	approved, _ := Jury(context.Background(), []dawn.Backend{a, b}, "criteria", "evidence", 2)
+	if !approved {
+		t.Fatal("two approvals should pass")
+	}
+	for _, judge := range []*recordingFakeJudge{a, b} {
+		if len(judge.seen) != 1 {
+			t.Fatalf("judge %s calls = %d, want 1", judge.name, len(judge.seen))
+		}
+		got := judge.seen[0]
+		if got.System != "criteria" || got.Prompt != "evidence" {
+			t.Fatalf("judge %s got system=%q prompt=%q", judge.name, got.System, got.Prompt)
+		}
+	}
 }
 
 func TestJuryQuorum(t *testing.T) {
