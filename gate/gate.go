@@ -18,16 +18,19 @@ import (
 	"github.com/valbaudo/dawn"
 )
 
-// verdictSchema is the typed contract every judge must return. Typed, not free
-// text, so a downstream step binds fields, not prose.
-var verdictSchema = map[string]any{
-	"type":                 "object",
-	"additionalProperties": false,
-	"required":             []any{"approved", "reason"},
-	"properties": map[string]any{
-		"approved": map[string]any{"type": "boolean"},
-		"reason":   map[string]any{"type": "string"},
-	},
+// newVerdictSchema returns the typed contract one judge must return. Every call
+// allocates the top-level map, nested maps, and required slice because backends
+// may normalize or otherwise mutate an invocation schema during concurrent use.
+func newVerdictSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []any{"approved", "reason"},
+		"properties": map[string]any{
+			"approved": map[string]any{"type": "boolean"},
+			"reason":   map[string]any{"type": "string"},
+		},
+	}
 }
 
 // Verdict is one judge's vote. A judge whose Invoke failed carries Err and never
@@ -49,7 +52,7 @@ func Judge(ctx context.Context, judge dawn.Backend, system, candidate string) Ve
 	res, err := judge.Invoke(ctx, dawn.Invocation{
 		System: system,
 		Prompt: candidate,
-		Schema: verdictSchema,
+		Schema: newVerdictSchema(),
 	})
 	v := Verdict{Judge: judge.Name()}
 	if err != nil {

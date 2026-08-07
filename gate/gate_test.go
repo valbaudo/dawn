@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -37,6 +38,92 @@ func (f *recordingFakeJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn
 	defer f.mu.Unlock()
 	f.seen = append(f.seen, in)
 	return dawn.Result{Output: map[string]any{"approved": true}}, nil
+}
+
+type mutatingSchemaJudge struct {
+	mutated chan struct{}
+	checked chan struct{}
+}
+
+func (mutatingSchemaJudge) Name() string { return "mutator" }
+func (j mutatingSchemaJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	properties := in.Schema["properties"].(map[string]any)
+	approved := properties["approved"].(map[string]any)
+	reason := properties["reason"].(map[string]any)
+	required := in.Schema["required"].([]any)
+	in.Schema["type"] = "mutated"
+	properties["leaked"] = true
+	approved["type"] = "string"
+	reason["type"] = "number"
+	required[0] = "mutated"
+	close(j.mutated)
+	<-j.checked
+
+	// Restore the received schema so this RED test does not poison unrelated tests
+	// while the implementation still uses one package-global map.
+	in.Schema["type"] = "object"
+	delete(properties, "leaked")
+	approved["type"] = "boolean"
+	reason["type"] = "string"
+	required[0] = "approved"
+	return dawn.Result{Output: map[string]any{"approved": true}}, nil
+}
+
+type checkingSchemaJudge struct {
+	name    string
+	wait    <-chan struct{}
+	checked chan<- struct{}
+	err     chan<- error
+}
+
+func (j checkingSchemaJudge) Name() string { return j.name }
+func (j checkingSchemaJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	if j.wait != nil {
+		<-j.wait
+	}
+	properties, propertiesOK := in.Schema["properties"].(map[string]any)
+	approved, approvedOK := map[string]any(nil), false
+	reason, reasonOK := map[string]any(nil), false
+	_, leaked := properties["leaked"]
+	if propertiesOK {
+		approved, approvedOK = properties["approved"].(map[string]any)
+		reason, reasonOK = properties["reason"].(map[string]any)
+	}
+	required, requiredOK := in.Schema["required"].([]any)
+	valid := in.Schema["type"] == "object" && propertiesOK && approvedOK && reasonOK && !leaked &&
+		approved["type"] == "boolean" && reason["type"] == "string" &&
+		requiredOK && len(required) == 2 && required[0] == "approved" && required[1] == "reason"
+	if !valid {
+		j.err <- fmt.Errorf("mutated verdict schema leaked into %s: %#v", j.name, in.Schema)
+	} else {
+		j.err <- nil
+	}
+	if j.checked != nil {
+		close(j.checked)
+	}
+	return dawn.Result{Output: map[string]any{"approved": true}}, nil
+}
+
+func TestJuryVerdictSchemasAreDeeplyIndependent(t *testing.T) {
+	mutated := make(chan struct{})
+	checked := make(chan struct{})
+	errs := make(chan error, 2)
+	judges := []dawn.Backend{
+		mutatingSchemaJudge{mutated: mutated, checked: checked},
+		checkingSchemaJudge{name: "concurrent judge", wait: mutated, checked: checked, err: errs},
+	}
+	approved, votes := Jury(context.Background(), judges, "criteria", "evidence", 2)
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if !approved || len(votes) != 2 {
+		t.Fatalf("jury result approved=%v votes=%d, want approval with two votes", approved, len(votes))
+	}
+
+	Judge(context.Background(), checkingSchemaJudge{name: "future judge", err: errs}, "criteria", "evidence")
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestJuryGivesEachJudgeIndependentIdenticalEvidence(t *testing.T) {

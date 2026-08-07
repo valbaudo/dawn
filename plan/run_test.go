@@ -171,15 +171,10 @@ func TestJudgeReceivesCompleteGeneratorEvidence(t *testing.T) {
 	if got.System != "Approve concise summaries" {
 		t.Fatalf("judge system = %q, want criteria", got.System)
 	}
-	for _, want := range []string{
-		"Generator request:\nReview the draft",
-		"--- input: draft ---\ndraft body",
-		"Captured output:\n{",
-		`"summary": "ok"`,
-	} {
-		if !strings.Contains(got.Prompt, want) {
-			t.Errorf("judge prompt missing %q:\n%s", want, got.Prompt)
-		}
+	wantEvidence := "Generator request:\nReview the draft\n\n--- input: draft ---\ndraft body" +
+		"\n\nCaptured output:\n{\n  \"alpha\": \"first\",\n  \"summary\": \"ok\"\n}"
+	if got.Prompt != wantEvidence {
+		t.Fatalf("judge evidence mismatch\ngot:\n%s\nwant:\n%s", got.Prompt, wantEvidence)
 	}
 	if strings.Contains(got.Prompt, secretURI) {
 		t.Fatalf("workspace URI leaked into textual evidence:\n%s", got.Prompt)
@@ -212,26 +207,58 @@ func TestJudgeEvidenceIsStable(t *testing.T) {
 	}
 }
 
+type sequencedGenerator struct {
+	seen   *[]dawn.Invocation
+	output map[string]any
+}
+
+func (g sequencedGenerator) Name() string { return "sequenced-generator" }
+func (g sequencedGenerator) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	*g.seen = append(*g.seen, in)
+	return dawn.Result{Output: g.output}, nil
+}
+
 func TestJudgeEvidenceIncludesRepairFeedback(t *testing.T) {
 	judge := &recordingJudge{approveAt: 2}
+	var generated []dawn.Invocation
 	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
-		"gen": producer{}, "judge": judge,
+		"gen":   sequencedGenerator{seen: &generated, output: map[string]any{"text": "fixed candidate"}},
+		"judge": judge,
 	})}
 	p := gated(&Gate{Judges: []string{"x/judge"}, Criteria: "be concise"})
 	if _, err := r.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	calls := judge.calls()
-	if len(calls) != 2 {
-		t.Fatalf("judge calls = %d, want 2", len(calls))
+	if len(calls) != 2 || len(generated) != 2 {
+		t.Fatalf("judge calls = %d, generator calls = %d, want 2 each", len(calls), len(generated))
 	}
-	for _, want := range []string{"Generator request:\nwrite", rejectionHeadingForTest, "make it concise"} {
-		if !strings.Contains(calls[1].Prompt, want) {
-			t.Errorf("repaired evidence missing %q:\n%s", want, calls[1].Prompt)
+	if got := generated[0].Prompt; got != "write" {
+		t.Fatalf("first generator prompt = %q, want stable base request", got)
+	}
+	if got := generated[1].Prompt; !strings.HasPrefix(got, "write\n\n"+rejectionHeadingForTest) ||
+		!strings.Contains(got, "make it concise") {
+		t.Fatalf("second generator prompt lacks appended repair feedback: %q", got)
+	}
+
+	const delimiter = "\n\nCaptured output:\n"
+	request, output, found := strings.Cut(calls[1].Prompt, delimiter)
+	if !found {
+		t.Fatalf("repaired evidence lacks captured-output delimiter:\n%s", calls[1].Prompt)
+	}
+	if !strings.HasPrefix(request, "Generator request:\nwrite") {
+		t.Fatalf("repair changed stable evidence prefix:\n%s", request)
+	}
+	for _, want := range []string{rejectionHeadingForTest, "make it concise"} {
+		if !strings.Contains(request, want) {
+			t.Errorf("generator request section missing %q:\n%s", want, request)
+		}
+		if strings.Contains(output, want) {
+			t.Errorf("repair feedback leaked into captured output section %q:\n%s", want, output)
 		}
 	}
-	if !strings.HasPrefix(calls[1].Prompt, "Generator request:\nwrite") {
-		t.Fatalf("repair changed stable evidence prefix:\n%s", calls[1].Prompt)
+	if output != "{\n  \"text\": \"fixed candidate\"\n}" {
+		t.Fatalf("captured output must be fixed generator output, got:\n%s", output)
 	}
 }
 
