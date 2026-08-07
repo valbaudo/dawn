@@ -15,16 +15,22 @@ import (
 )
 
 func TestControlledGitEnvStripsRepositoryOverridesCaseInsensitively(t *testing.T) {
-	for _, key := range []string{
+	keys := []string{
 		"git_dir", "Git_Work_Tree", "GIT_INDEX_FILE", "git_common_dir",
 		"GIT_OBJECT_DIRECTORY", "git_alternate_object_directories", "GIT_NAMESPACE",
 		"git_ceiling_directories", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX", "GIT_SUPER_PREFIX",
-	} {
+		"Git_Config", "GIT_IMPLICIT_WORK_TREE", "git_shallow_file", "GIT_NO_REPLACE_OBJECTS", "Git_Internal_Super_Prefix",
+	}
+	for _, key := range keys {
 		t.Setenv(key, "hostile")
+	}
+	forbidden := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		forbidden[strings.ToUpper(key)] = true
 	}
 	for _, entry := range controlledGitEnv() {
 		key, _, _ := strings.Cut(entry, "=")
-		if isRepositoryGitEnv(strings.ToUpper(key)) {
+		if forbidden[strings.ToUpper(key)] {
 			t.Fatalf("controlled environment retained repository override %q", entry)
 		}
 	}
@@ -36,6 +42,7 @@ func TestTreesLifecycleIgnoresInheritedRepositoryEnvironment(t *testing.T) {
 		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
 		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
 		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX", "GIT_SUPER_PREFIX",
+		"GIT_CONFIG", "GIT_IMPLICIT_WORK_TREE", "GIT_SHALLOW_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_INTERNAL_SUPER_PREFIX",
 	} {
 		t.Setenv(key, hostile)
 	}
