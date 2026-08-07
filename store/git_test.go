@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -250,6 +251,71 @@ func TestCaptureIgnoresCommandScopeGitConfig(t *testing.T) {
 	}
 	if hostileRef != cleanRef {
 		t.Fatalf("command-scope Git config changed capture: %s != %s", hostileRef, cleanRef)
+	}
+}
+
+func TestGitEnvFiltersInheritedConfigCaseInsensitively(t *testing.T) {
+	t.Setenv("gIt_CoNfIg_PaRaMeTeRs", "'core.autocrlf=true'")
+	t.Setenv("gIt_CoNfIg_CoUnT", "99")
+	t.Setenv("gIt_AtTr_NoSyStEm", "0")
+
+	env := (&Trees{gitDir: t.TempDir()}).env("", "")
+	counts := make(map[string]int)
+	values := make(map[string]string)
+	for _, entry := range env {
+		key, value, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(key)
+		if strings.HasPrefix(upper, "GIT_CONFIG_") || upper == "GIT_ATTR_NOSYSTEM" {
+			counts[upper]++
+			values[upper] = value
+		}
+	}
+	if counts["GIT_CONFIG_PARAMETERS"] != 0 {
+		t.Fatal("mixed-case GIT_CONFIG_PARAMETERS survived filtering")
+	}
+	if counts["GIT_CONFIG_COUNT"] != 1 || values["GIT_CONFIG_COUNT"] != "2" {
+		t.Fatalf("GIT_CONFIG_COUNT entries = %d, value = %q", counts["GIT_CONFIG_COUNT"], values["GIT_CONFIG_COUNT"])
+	}
+	if counts["GIT_ATTR_NOSYSTEM"] != 1 || values["GIT_ATTR_NOSYSTEM"] != "1" {
+		t.Fatalf("GIT_ATTR_NOSYSTEM entries = %d, value = %q", counts["GIT_ATTR_NOSYSTEM"], values["GIT_ATTR_NOSYSTEM"])
+	}
+}
+
+func TestTreeOperationsIgnoreMalformedConfigParametersSetBeforeNewTrees(t *testing.T) {
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'unterminated")
+	tr, err := NewTrees(filepath.Join(t.TempDir(), "cas"))
+	if err != nil {
+		t.Fatalf("NewTrees inherited hostile Git config: %v", err)
+	}
+	ctx := context.Background()
+	src := t.TempDir()
+	writeFile(t, src, "a.txt", "one\n")
+	before, err := tr.Capture(ctx, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, src, "a.txt", "two\n")
+	after, err := tr.Capture(ctx, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, after, dst); err != nil {
+		t.Fatal(err)
+	}
+	if diff, err := tr.Diff(ctx, before, after); err != nil || !strings.Contains(diff, "+two") {
+		t.Fatalf("Diff under hostile config = %q, %v", diff, err)
+	}
+	var archive bytes.Buffer
+	if err := tr.Archive(ctx, after, &archive); err != nil || archive.Len() == 0 {
+		t.Fatalf("Archive under hostile config produced %d bytes, %v", archive.Len(), err)
+	}
+	roundTrip, err := tr.Capture(ctx, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip != after {
+		t.Fatalf("subsequent Capture = %s, want %s", roundTrip, after)
 	}
 }
 

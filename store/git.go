@@ -82,7 +82,7 @@ func NewTrees(dir string) (*Trees, error) {
 		if err := os.MkdirAll(abs, 0o755); err != nil {
 			return nil, fmt.Errorf("store: mkdir %s: %w", abs, err)
 		}
-		if out, err := git(context.Background(), "", nil, "init", "--bare", "-q", abs); err != nil {
+		if out, err := git(context.Background(), "", controlledGitEnv(), "init", "--bare", "-q", abs); err != nil {
 			return nil, fmt.Errorf("store: init tree store: %w: %s", err, out)
 		}
 	}
@@ -299,16 +299,18 @@ func (t *Trees) tempIndex() (path string, done func(), err error) {
 	return name, func() { _ = os.Remove(name) }, nil
 }
 
-func (t *Trees) env(workTree, index string) []string {
+func controlledGitEnv() []string {
 	ambient := os.Environ()
-	env := make([]string, 0, len(ambient)+11)
+	env := make([]string, 0, len(ambient)+8)
 	for _, entry := range ambient {
-		if strings.HasPrefix(entry, "GIT_CONFIG_") || strings.HasPrefix(entry, "GIT_ATTR_NOSYSTEM=") {
+		key, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(key)
+		if strings.HasPrefix(upper, "GIT_CONFIG_") || upper == "GIT_ATTR_NOSYSTEM" {
 			continue
 		}
 		env = append(env, entry)
 	}
-	env = append(env,
+	return append(env,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_ATTR_NOSYSTEM=1",
@@ -317,8 +319,11 @@ func (t *Trees) env(workTree, index string) []string {
 		"GIT_CONFIG_VALUE_0=false",
 		"GIT_CONFIG_KEY_1=core.excludesFile",
 		"GIT_CONFIG_VALUE_1="+os.DevNull,
-		"GIT_DIR="+t.gitDir,
 	)
+}
+
+func (t *Trees) env(workTree, index string) []string {
+	env := append(controlledGitEnv(), "GIT_DIR="+t.gitDir)
 	if workTree != "" {
 		// ABSOLUTE. The command also runs with cmd.Dir = workTree, so a relative
 		// GIT_WORK_TREE would be resolved a second time against it —
