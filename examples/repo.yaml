@@ -6,7 +6,7 @@
 # accepted fix and nothing else.
 #
 #   dawn run  examples/repo.yaml --in examples/calc
-#   dawn show examples/repo.yaml test.workspace | tar -x -C out/
+#   dawn show examples/repo.yaml test.workspace --in examples/calc | tar -x -C out/
 #
 # examples/calc is only ever READ. Each step edits a scratch copy, and what
 # survives is a content-addressed tree ref.

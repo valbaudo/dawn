@@ -20,12 +20,13 @@ Add an optional capability interface for a backend that can materialize workspac
 
 Create one runner preflight path shared by `Run` and `Status`. Before invoking or pricing any step, it resolves the plan’s generator and judge backends and validates:
 
-1. every requested `--redo` step exists;
-2. every `in.workspace` reference has a root supplied by `--in`;
-3. a step with `expect:` uses a tree-capturing backend;
-4. references to an upstream `.workspace` or `.diff` originate from a tree-capturing backend;
-5. a step receiving a workspace ref uses a backend that can materialize it; and
-6. every configured generator and judge backend resolves.
+1. every `in.workspace` reference has a root supplied by `--in`;
+2. a step with `expect:` uses a tree-capturing backend;
+3. references to an upstream `.workspace` or `.diff` originate from a tree-capturing backend;
+4. a step receiving a workspace ref uses a backend that can materialize it; and
+5. every configured generator and judge backend resolves.
+
+The CLI separately validates requested `--redo` names after loading the plan and before constructing stores or a runner. Direct callers supply `Runner.Redo`; runner preflight does not validate its keys.
 
 These are author/configuration errors. The CLI wraps them as usage errors so both `run` and `show` exit 2. Preflight must complete before any backend invocation.
 
@@ -61,11 +62,11 @@ Delete `gate.FromResult`; the runner deliberately judges the whole output object
 
 Validate `--redo` names after loading the plan and before opening or running paid work. Empty or unknown names are usage errors that name the invalid step.
 
-`show PLAN` performs the same preflight as `run`, including missing `--in` and backend capability checks. `show PLAN REF` reports an uncommitted result as a usage error. Both usage banner lines and the command package documentation list all four flags: `--dir`, `--in`, `--redo`, and `--jobs`.
+Both `show PLAN` and `show PLAN REF` run the same `Status`/runner preflight as `run`, including missing-`--in` and backend-capability checks. Either show form therefore requires `--in` when the plan references `in.workspace`; neither requires it for a plan without that reference. `show PLAN REF` reports an uncommitted result as a usage error. Both usage banner lines and the command package documentation list all four flags: `--dir`, `--in`, `--redo`, and `--jobs`.
 
 Test `execute` directly for flag parsing, positional/flag splitting, and all five usage-error families without calling a real agent. Keep production refactoring limited to explicit dependency or writer seams needed by those tests.
 
-`dawn show PLAN step.workspace` continues streaming a tar archive. Test the real `store.Trees.Archive` output by reading it with Go’s tar reader.
+`dawn show PLAN step.workspace [--in DIR]` continues streaming a tar archive; `--in` is required when the plan references `in.workspace`. Test the real `store.Trees.Archive` output by reading it with Go’s tar reader.
 
 ### Deterministic tree capture
 
@@ -77,7 +78,7 @@ Exercise archive behavior, executable-bit normalization, malformed refs, `Mem.Ge
 
 ### Kind vocabulary and documentation
 
-`KindValue` and `KindWorkspace` are the only currently produced kinds. Either remove unreachable kinds when no public behavior requires them, or mark them explicitly as reserved for future backends. Documentation must not describe an independent artifact channel that the binary cannot produce; declared paths are files forced into a captured workspace.
+`KindWorkspace` is the only kind the current binary emits in `Result.Produced`. Keep `KindValue`, `KindArtifact`, and `KindSession` as reserved, currently unemitted constants for API compatibility; scalar values live in `Result.Output`. Documentation must not describe an independent artifact channel that the binary cannot produce: expected paths may be files or directories, and are forced into a captured workspace.
 
 Split the fused Claude backend documentation so `DefaultTimeout`, `defaultSystem`, and each exported backend field have accurate adjacent comments. Add argument-capture tests proving the text backend retains `--system-prompt` and the workspace backend retains `--exclude-dynamic-system-prompt-sections`.
 
@@ -93,11 +94,11 @@ Update SPEC.md and README.md so they:
 
 ### Platform and CI
 
-Add CI that runs `go test ./...` on the supported native environment and compiles/tests the non-Unix build surface. The non-Unix check proves build-tagged files continue compiling even though locking and process-group behavior have documented platform exceptions.
+Add CI that runs `go test ./...` and `go vet ./...` on the supported native environment and cross-compiles the non-Unix build surface with `GOOS=windows go build ./...`; do not cross-run tests. The non-Unix check proves build-tagged files continue compiling even though locking and process-group behavior have documented platform exceptions.
 
 ## Test-Driven Delivery Slices
 
-1. **Preflight and usage:** failing runner and CLI tests for unknown redo, missing `--in`, invalid producer/consumer capabilities, uncommitted refs, and shared `show`/`run` validation; then minimal preflight and error classification.
+1. **Preflight and usage:** failing CLI tests for unknown/empty redo and uncommitted refs, plus runner/CLI tests for missing `--in`, invalid producer/consumer capabilities, and shared `show`/`run` preflight; then minimal preflight and error classification.
 2. **Gated `expect:` repair:** failing tests showing first-attempt missing paths currently abort and pay no repair; then typed capture errors and pre-judge rejection behavior.
 3. **Judge evidence:** failing tests capture judge invocations and assert prompt, resolved inputs, output, and criteria; then deterministic evidence construction.
 4. **Capture determinism:** failing hostile-config tests; then controlled git configuration.

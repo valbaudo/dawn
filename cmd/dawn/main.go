@@ -13,7 +13,8 @@
 // is show plus executing the stale frontier.
 //
 // `show PLAN <step>.<field>` prints a committed value, and a workspace field
-// streams as a tar: `dawn show p.yaml fix.workspace | tar -x -C out/`.
+// streams as a tar: `dawn show p.yaml fix.workspace --in src | tar -x -C out/`.
+// The --in flag is required when the plan references in.workspace.
 package main
 
 import (

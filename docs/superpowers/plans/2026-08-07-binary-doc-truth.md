@@ -626,7 +626,7 @@ git commit -m "test(store): cover defensive copies and atomic write failures"
 - Create: `.github/workflows/ci.yml`
 
 **Interfaces:**
-- Keeps: all existing `Kind` constants for API compatibility, explicitly marked reserved where unreachable.
+- Keeps: all existing `Kind` constants for API compatibility; only `KindWorkspace` is currently emitted in `Result.Produced`, while `KindValue`, `KindArtifact`, and `KindSession` are reserved and unemitted.
 - Documents: Unix-only run lock and Unix-only process-group cancellation.
 
 - [ ] **Step 1: Add non-Unix compile commands locally**
@@ -649,6 +649,8 @@ name: CI
 on:
   push:
   pull_request:
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -673,7 +675,7 @@ Pin actions to immutable commit SHAs before committing if repository policy requ
 
 - [ ] **Step 3: Make Kind comments truthful**
 
-Keep `KindValue` and `KindWorkspace` as produced kinds. Mark `KindArtifact` and `KindSession` as reserved for future backends, or remove them only if repository-wide search proves no public examples/tests rely on them. Update `Result.Produced` comments to stop claiming the current binary emits independent artifact/session refs.
+Keep all existing constants for API compatibility. `KindWorkspace` is the only kind the current binary emits in `Result.Produced`; mark `KindValue`, `KindArtifact`, and `KindSession` reserved and currently unemitted. Document that scalar values live in `Result.Output` and expected paths live inside workspace refs.
 
 - [ ] **Step 4: Reconcile README claims**
 
@@ -681,7 +683,7 @@ Update README to state:
 
 - both commands accept `--dir`, `--in`, `--redo`, and `--jobs`;
 - independent step concurrency is implemented;
-- declared artifact paths are files forced into the workspace tree, not a separate emitted artifact kind;
+- expected paths may be files or directories and are forced into the workspace tree, not emitted as separate artifact refs;
 - personal git configuration cannot alter captures;
 - one-run locking and process-group cancellation are Unix guarantees, with non-Unix builds compiling but the lock remaining a no-op;
 - the language summary says four flags, not three.
@@ -692,7 +694,8 @@ Remove concurrency from “Not here yet”; retain only genuinely unbuilt backen
 
 Update SPEC sections for:
 
-- load/preflight validation terminology: capability checks occur before invocation when concrete backends are available;
+- validation terminology: CLI `validateRedo` rejects empty/unknown names before constructing stores or a runner, while shared Runner preflight handles backend resolution, capabilities, and required `--in` roots;
+- both `show PLAN` and `show PLAN REF` run shared `Status`/Runner preflight and require `--in` whenever the plan references `in.workspace`;
 - judge evidence: criteria plus resolved generator prompt/input rendering and complete output object;
 - gated missing-path repair and zero judge tokens;
 - deterministic capture independent of system/global git config;

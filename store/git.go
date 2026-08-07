@@ -349,10 +349,9 @@ func git(ctx context.Context, dir string, env []string, args ...string) (string,
 	return out.String(), err
 }
 
-// Archive streams a captured tree as a tar to w. This is how a tree leaves dawn:
-// `dawn show plan.yaml fix.workspace | tar -x -C out/`. Piping rather than an
-// --into flag keeps dawn out of the business of reimplementing tar's own
-// --strip-components, --only and --list.
+// Archive streams a captured tree as a tar to w. The CLI pipes this output to
+// standard output rather than adding an --into flag, keeping dawn out of the
+// business of reimplementing tar's own --strip-components, --only and --list.
 func (t *Trees) Archive(ctx context.Context, tree string, w io.Writer) error {
 	cmd := proc.Command(ctx, "git", "archive", "--format=tar", tree)
 	cmd.Env = t.env("", "")
