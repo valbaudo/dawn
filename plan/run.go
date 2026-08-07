@@ -367,11 +367,6 @@ func (r *Runner) preflight(p *Plan) (err error) {
 		}
 		backends[id] = b
 
-		if len(s.Expect) > 0 {
-			if _, ok := b.(dawn.TreeCapturer); !ok {
-				return fmt.Errorf("step %q declares expect: but agent %q captures no tree", id, s.Agent)
-			}
-		}
 		if s.Gate != nil {
 			for _, spec := range s.Gate.Judges {
 				a, err := ParseAgent(spec)
@@ -388,6 +383,11 @@ func (r *Runner) preflight(p *Plan) (err error) {
 	for _, id := range p.IDs() {
 		s := p.Steps[id]
 		consumer := backends[id]
+		if len(s.Expect) > 0 {
+			if _, ok := consumer.(dawn.TreeCapturer); !ok {
+				return fmt.Errorf("step %q declares expect: but agent %q captures no tree", id, s.Agent)
+			}
+		}
 		for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
 			did, field, err := ParseRef(s.Inputs[name])
 			if err != nil {

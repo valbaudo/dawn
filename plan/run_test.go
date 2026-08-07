@@ -189,6 +189,34 @@ type workspaceConsumer struct{ producer }
 
 func (workspaceConsumer) MaterializesWorkspace() {}
 
+func TestPreflightResolvesAllBackendsBeforeCapabilityValidation(t *testing.T) {
+	var calls int
+	var resolved []string
+	p := &Plan{Steps: map[string]Step{
+		"a-invalid": {Agent: "x/invalid", Prompt: "fail", Expect: []string{"artifact"}},
+		"b-later": {
+			Agent: "x/later", Prompt: "later",
+			Gate: &Gate{Judges: []string{"x/judge-a", "x/judge-b"}, Criteria: "correct"},
+		},
+	}}
+	r := &Runner{Backend: func(a Agent) (dawn.Backend, error) {
+		resolved = append(resolved, a.Model)
+		return textProducer{calls: &calls}, nil
+	}}
+
+	err := r.preflight(p)
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("preflight failure must be a ValidationError, got %T: %v", err, err)
+	}
+	if got, want := strings.Join(resolved, ","), "invalid,later,judge-a,judge-b"; got != want {
+		t.Fatalf("all generators and judges must resolve before capability validation: got %q, want %q", got, want)
+	}
+	if calls != 0 {
+		t.Fatalf("preflight must not invoke backends, but %d invocations ran", calls)
+	}
+}
+
 func TestPreflightRejectsReservedRefsFromNonTreeBackend(t *testing.T) {
 	for _, field := range []string{"workspace", "diff"} {
 		t.Run(field, func(t *testing.T) {
