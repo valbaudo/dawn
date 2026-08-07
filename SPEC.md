@@ -186,10 +186,14 @@ string).
 declared upstream or reserved; the graph is acyclic; judges are well-formed; and an
 explicit quorum ∈ 1..N.
 
-**Preflight**, after concrete backends are available and before any invocation or token
-spend: every generator and judge resolves; `expect:` and reserved `workspace`/`diff`
-producers capture trees; workspace consumers can materialize them; required `--in`
-roots and requested `--redo` names exist.
+**CLI validation**, after loading the plan but before constructing stores or a runner,
+rejects empty or unknown `--redo` names.
+
+**Runner preflight**, after concrete backends are available and before any invocation or
+token spend: every generator and judge resolves; `expect:` and reserved
+`workspace`/`diff` producers capture trees; workspace consumers can materialize them;
+and any referenced `in.workspace` has a root supplied by `--in`. Direct Runner callers
+supply `Runner.Redo`; the runner does not validate those names.
 
 **Runtime**, after the agent returns and *before* the step commits: strict-parse, every
 declared field present, enum values members, **no undeclared fields**. Any failure
@@ -199,7 +203,7 @@ rejects the output whole — a stray key means the model improvised.
 ```
 invoke → capture tree + assert expect → validate → jury → commit
 ```
-A non-conforming candidate never reaches a judge. A missing declared path under a gate
+A non-conforming candidate never reaches a judge. A missing expected path under a gate
 consumes an attempt, supplies path-specific repair feedback, and spends zero judge
 tokens for that attempt; ungated it fails the step. Other capture errors are mechanical.
 
@@ -213,11 +217,12 @@ step rather than the run.
 
 The workspace tree is the only current file/artifact channel, and **producer path equals
 consumer path** — `dist/dawn` written by `build` is read at `dist/dawn` by `smoke`.
-Declared paths are files forced into that captured workspace, not independent
-`artifact` refs. The public `KindArtifact` and `KindSession` names remain reserved for
-future backends; the current binary produces neither. Every tree-capturing step gets its
-own scratch dir: materialize inputs → run → capture → discard. The supplied host tree is
-captured first; agents work only in the scratch copy.
+Expected paths are files or directories forced into that captured workspace, not
+independent `artifact` refs. The public `KindValue`, `KindArtifact`, and `KindSession`
+names remain reserved for future backends; the current binary emits none in
+`Result.Produced`. Scalar values live in `Result.Output`. Every tree-capturing step gets
+its own scratch dir: materialize inputs → run → capture → discard. The supplied host tree
+is captured first; agents work only in the scratch copy.
 
 `expect:` is a postcondition, and two lines of git give both halves:
 
@@ -430,9 +435,12 @@ Two honest limits on the preview: the bill is exact in **calls** but a range in 
 `unknown` rather than `stale`, because a step's key depends on its upstream's resolved
 output.
 
-**`dawn show PLAN REF` writes to stdout** — `dawn show p.yaml fix.workspace | tar -x -C out/`.
-No `--into`, because `--into` is the first flag of a family ending in
-`--strip-components`, `--only`, `--list`: tar, reimplemented badly.
+**`dawn show PLAN REF` writes to stdout** —
+`dawn show p.yaml fix.workspace --in src | tar -x -C out/`. It resolves whether the
+requested step is committed through `Runner.Status`, so the shared runner preflight still
+requires `--in` when any plan input references `in.workspace`. No `--into`, because
+`--into` is the first flag of a family ending in `--strip-components`, `--only`, `--list`:
+tar, reimplemented badly.
 
 Exit `0` accepted · `1` **gate refused** · `2` usage/parse/validate · `3` mechanical ·
 `130` interrupted. Unattended means something reads `$?`, and the distinction nothing
@@ -499,8 +507,8 @@ steps:
 dawn show plan.yaml --in ~/src/csvtool          # what is stale, and the call count
 dawn run  plan.yaml --in ~/src/csvtool          # run; re-run == resume
 dawn run  plan.yaml --in ~/src/csvtool --redo fix
-dawn show plan.yaml note.line                   # read a committed value
-dawn show plan.yaml fix.workspace | tar -x -C out/
+dawn show plan.yaml note.line --in ~/src/csvtool  # read a committed value
+dawn show plan.yaml fix.workspace --in ~/src/csvtool | tar -x -C out/
 ```
 
 ---
@@ -548,9 +556,10 @@ and a posture that dangerous should be a word an author typed.
    manual of worked criteria, not a feature.
 3. ~~**Sequential execution.**~~ Answered: `--jobs N`. It changed no keys, because the DAG
    already said which steps are independent — the flag only stopped ignoring it.
-4. **`--in` is required for `dawn show PLAN`** (pricing needs the input digest) but optional
-   for `dawn show PLAN REF` (reading a committed artifact must not need live host state).
-   Documented rather than papered over.
+4. **`--in` follows plan references for both show forms.** `dawn show PLAN` and
+   `dawn show PLAN REF` both call `Runner.Status`, whose shared preflight requires a root
+   whenever the plan references `in.workspace`. A plan with no such reference needs no
+   `--in`.
 5. **The store only grows.** Pinning is per capture, including gate attempts nobody
    accepted, so `git gc` now reclaims nothing. That is the deliberate side of the trade —
    unbounded growth is a disk problem with an obvious fix, silent deletion of committed

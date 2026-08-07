@@ -89,8 +89,9 @@ does not declare fails when the plan loads, before a token is spent.
 Inputs resolve by kind: a workspace ref travels into the next invocation and is
 materialized by the workspace backend, while a scalar is rendered into the prompt.
 Both are committed, so a later run can still hand a workspace to the next step.
-The public `artifact` and `session` kinds are reserved for future backends; the
-current binary produces neither.
+The public `value`, `artifact`, and `session` kinds remain reserved for future
+backends; the current binary emits none in `Result.Produced`. Scalar values live
+in `Result.Output`.
 
 ```yaml
 steps:
@@ -124,8 +125,8 @@ directly** — not just consecutive ones. System and personal git configuration
 cannot change capture semantics: dawn disables ambient attributes, line-ending
 conversion, and global excludes while preserving the workspace's `.gitignore`.
 The working directory needs no `.git`; the store is the only repository involved.
-A declared `expect:` path is force-added to this workspace tree (even when ignored)
-and must exist; it is not emitted as a separate artifact ref.
+An `expect:` path (a file or directory) is force-added to this workspace tree (even
+when ignored) and must exist; it is not emitted as a separate artifact ref.
 
 ## What it refuses to do
 

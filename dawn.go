@@ -19,11 +19,13 @@ import "context"
 type Kind string
 
 const (
-	KindValue     Kind = "value"     // small JSON / scalar result
 	KindWorkspace Kind = "workspace" // a directory / repository tree
 
-	// KindArtifact and KindSession are reserved for future backends. The current
-	// binary produces neither kind; declared files live inside a workspace ref.
+	// KindValue, KindArtifact, and KindSession are reserved for future backends
+	// and retained for API compatibility. The current binary emits none of them in
+	// Result.Produced: scalar values live in Result.Output, while expected paths
+	// (files or directories) live inside a workspace ref.
+	KindValue    Kind = "value"
 	KindArtifact Kind = "artifact"
 	KindSession  Kind = "session"
 )
@@ -78,9 +80,10 @@ type Result struct {
 	Output map[string]any // typed output (validated against Invocation.Schema by the caller)
 	Tokens Tokens         // cost / cache signal
 	// Produced holds new state refs this invocation created. The current tree-
-	// capturing backend emits a workspace ref; declared files are contained in
-	// that tree rather than emitted as independent artifact refs. It is empty for
-	// a plain text call. The next invocation consumes these refs via Inputs.
+	// capturing backend emits a workspace ref; expected paths (files or
+	// directories) are contained in that tree rather than emitted as independent
+	// refs. It is empty for a plain text call. Scalar values live in Output. The
+	// next invocation consumes Produced refs via Inputs.
 	Produced map[string]Ref `json:"produced,omitempty"`
 }
 
