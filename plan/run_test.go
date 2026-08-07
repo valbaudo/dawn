@@ -144,6 +144,70 @@ func TestGatedStepRepairs(t *testing.T) {
 	}
 }
 
+func TestGatedMissingExpectRepairsBeforeJudging(t *testing.T) {
+	var generatorCalls int
+	var generatorPrompts []dawn.Invocation
+	var judgeCalls atomic.Int64
+	p := gated(&Gate{Judges: []string{"x/a", "x/b", "x/c"}, Criteria: "be good"})
+	step := p.Steps["draft"]
+	step.Expect = []string{"dist/dawn"}
+	p.Steps["draft"] = step
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"gen": captureFailingProducer{
+			calls: &generatorCalls, seen: &generatorPrompts,
+			err: &store.MissingPathError{Path: "dist/dawn"}, once: true,
+		},
+		"a": voter{name: "a", approve: true, seen: &judgeCalls},
+		"b": voter{name: "b", approve: true, seen: &judgeCalls},
+		"c": voter{name: "c", approve: true, seen: &judgeCalls},
+	})}
+
+	done, err := r.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("missing expected path should be repaired: %v", err)
+	}
+	if generatorCalls != 2 {
+		t.Fatalf("generator calls = %d, want 2", generatorCalls)
+	}
+	if got := judgeCalls.Load(); got != 3 {
+		t.Fatalf("judge calls = %d, want one panel round (3)", got)
+	}
+	if !strings.Contains(generatorPrompts[1].Prompt, "dist/dawn") {
+		t.Fatalf("second prompt must name missing path, got %q", generatorPrompts[1].Prompt)
+	}
+	if got := done["draft"].Produced["workspace"].URI; got != "tree-repaired" {
+		t.Fatalf("committed workspace = %q, want accepted attempt", got)
+	}
+}
+
+func TestGatedCaptureErrorRemainsMechanical(t *testing.T) {
+	var generatorCalls int
+	var generatorPrompts []dawn.Invocation
+	var judgeCalls atomic.Int64
+	captureErr := errors.New("capture exploded")
+	p := gated(&Gate{Judges: []string{"x/a", "x/b", "x/c"}, Criteria: "be good"})
+	step := p.Steps["draft"]
+	step.Expect = []string{"dist/dawn"}
+	p.Steps["draft"] = step
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"gen": captureFailingProducer{calls: &generatorCalls, seen: &generatorPrompts, err: captureErr},
+		"a":   voter{name: "a", approve: true, seen: &judgeCalls},
+		"b":   voter{name: "b", approve: true, seen: &judgeCalls},
+		"c":   voter{name: "c", approve: true, seen: &judgeCalls},
+	})}
+
+	_, err := r.Run(context.Background(), p)
+	if !errors.Is(err, captureErr) {
+		t.Fatalf("ordinary capture error must remain mechanical, got %v", err)
+	}
+	if generatorCalls != 1 {
+		t.Fatalf("mechanical error must consume no repair attempt, generator calls = %d", generatorCalls)
+	}
+	if got := judgeCalls.Load(); got != 0 {
+		t.Fatalf("judge calls = %d, want 0", got)
+	}
+}
+
 // approveOn votes yes only once the candidate carries the marker.
 type approveOn struct{ name, marker string }
 
@@ -184,6 +248,27 @@ func (p textProducer) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result
 type treeProducer struct{ producer }
 
 func (treeProducer) CapturesTree() {}
+
+type captureFailingProducer struct {
+	calls *int
+	seen  *[]dawn.Invocation
+	err   error
+	once  bool
+}
+
+func (p captureFailingProducer) Name() string  { return "capture-failing-producer" }
+func (p captureFailingProducer) CapturesTree() {}
+func (p captureFailingProducer) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	*p.calls++
+	*p.seen = append(*p.seen, in)
+	if !p.once || *p.calls == 1 {
+		return dawn.Result{}, p.err
+	}
+	return dawn.Result{
+		Output:   conform(in, in.Prompt),
+		Produced: map[string]dawn.Ref{"workspace": {Kind: dawn.KindWorkspace, URI: "tree-repaired"}},
+	}, nil
+}
 
 type workspaceConsumer struct{ producer }
 

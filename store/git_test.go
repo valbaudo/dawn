@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,6 +240,13 @@ func TestCaptureFailsOnAMissingDeclaredPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dist/never-built") {
 		t.Fatalf("the error must name the missing path, got: %v", err)
+	}
+	var missing *MissingPathError
+	if !errors.As(err, &missing) {
+		t.Fatalf("error type = %T, want *MissingPathError", err)
+	}
+	if missing.Path != "dist/never-built" {
+		t.Fatalf("Path = %q", missing.Path)
 	}
 }
 

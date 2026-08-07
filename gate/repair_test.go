@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/valbaudo/dawn"
@@ -23,6 +24,17 @@ func (c contentJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result
 
 func threeContentJudges() []dawn.Backend {
 	return []dawn.Backend{contentJudge{"a"}, contentJudge{"b"}, contentJudge{"c"}}
+}
+
+type countingContentJudge struct {
+	name  string
+	calls *atomic.Int64
+}
+
+func (c countingContentJudge) Name() string { return c.name }
+func (c countingContentJudge) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
+	c.calls.Add(1)
+	return contentJudge{name: c.name}.Invoke(ctx, in)
 }
 
 // scripted returns a Generate that yields seq in order (repeating the last),
@@ -53,6 +65,39 @@ func TestGatePassesFirstTry(t *testing.T) {
 	}
 	if !out.Approved || out.Attempts != 1 {
 		t.Fatalf("want approved on attempt 1, got %+v", out)
+	}
+}
+
+func TestGateConsumesPreJudgeRejectionWithoutCallingJudges(t *testing.T) {
+	var feedback []string
+	var calls atomic.Int64
+	attempt := 0
+	gen := func(_ context.Context, seen string) (Candidate, error) {
+		feedback = append(feedback, seen)
+		attempt++
+		if attempt == 1 {
+			return Candidate{Rejection: "you did not produce dist/dawn"}, nil
+		}
+		return Text("good"), nil
+	}
+	judges := []dawn.Backend{
+		countingContentJudge{name: "a", calls: &calls},
+		countingContentJudge{name: "b", calls: &calls},
+		countingContentJudge{name: "c", calls: &calls},
+	}
+
+	out, err := Gate(context.Background(), gen, judges, "sys", Majority(3), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Approved || out.Attempts != 2 {
+		t.Fatalf("want approval on attempt 2, got %+v", out)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("judge calls = %d, want one panel round (3)", got)
+	}
+	if !strings.Contains(feedback[1], "dist/dawn") {
+		t.Fatalf("repair feedback must name the missing path, got %q", feedback[1])
 	}
 }
 

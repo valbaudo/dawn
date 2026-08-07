@@ -489,6 +489,13 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.B
 		}
 		res, err := backend.Invoke(ctx, attempt)
 		if err != nil {
+			var missing *store.MissingPathError
+			if errors.As(err, &missing) {
+				// Preserve one slot per gate attempt. This rejected placeholder can
+				// never be selected, but keeps the accepted attempt's index aligned.
+				generated = append(generated, dawn.Result{})
+				return gate.Candidate{Rejection: "you did not produce " + missing.Path}, nil
+			}
 			return gate.Candidate{}, err
 		}
 		// Validate BEFORE the panel sees it: a non-conforming candidate never

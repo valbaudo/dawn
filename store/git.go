@@ -33,6 +33,15 @@ const EmptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 // own; this store is the only repository involved.
 type Trees struct{ gitDir string }
 
+// MissingPathError reports a declared capture postcondition that the backend did
+// not produce. Callers may treat this one failure as repairable while preserving
+// every other capture failure as mechanical.
+type MissingPathError struct{ Path string }
+
+func (e *MissingPathError) Error() string {
+	return fmt.Sprintf("declared path %q was not produced", e.Path)
+}
+
 // NewTrees opens (creating if needed) a tree store at dir.
 func NewTrees(dir string) (*Trees, error) {
 	abs, err := filepath.Abs(dir)
@@ -99,9 +108,17 @@ func (t *Trees) CaptureFrom(ctx context.Context, workDir, base string, must ...s
 		return "", fmt.Errorf("store: capture %s: %w: %s", workDir, err, out)
 	}
 	if len(must) > 0 {
+		for _, path := range must {
+			if _, err := os.Lstat(filepath.Join(workDir, filepath.FromSlash(path))); err != nil {
+				if os.IsNotExist(err) {
+					return "", &MissingPathError{Path: path}
+				}
+				return "", fmt.Errorf("store: inspect declared path %q: %w", path, err)
+			}
+		}
 		args := append([]string{"add", "-f", "--"}, must...)
 		if out, err := git(ctx, workDir, env, args...); err != nil {
-			return "", fmt.Errorf("store: declared path missing from %s: %w: %s", workDir, err, strings.TrimSpace(out))
+			return "", fmt.Errorf("store: force declared paths in %s: %w: %s", workDir, err, strings.TrimSpace(out))
 		}
 	}
 	if err := t.refuseGitlinks(ctx, workDir, env); err != nil {

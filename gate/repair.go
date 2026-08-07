@@ -14,8 +14,9 @@ import (
 // caller wants back is the artifact that rendering describes. Without them an
 // accepted attempt's workspace would be unrecoverable from the outcome.
 type Candidate struct {
-	Text     string              // what the judges read
-	Produced map[string]dawn.Ref // state refs this attempt created, if any
+	Text      string              // what the judges read
+	Produced  map[string]dawn.Ref // state refs this attempt created, if any
+	Rejection string              // pre-judge rejection reason; skips the jury
 }
 
 // Text is a Candidate with no artifacts, for generators that only produce prose.
@@ -39,7 +40,7 @@ type Generate func(ctx context.Context, feedback string) (Candidate, error)
 type Outcome struct {
 	Approved  bool      // did a candidate reach quorum within maxAttempts?
 	Candidate Candidate // the accepted attempt, or the last one tried
-	Attempts  int       // number of evaluations performed
+	Attempts  int       // number of generation attempts consumed
 	Votes     []Verdict // the final round's votes
 }
 
@@ -51,8 +52,9 @@ type Outcome struct {
 //
 // crash != verdict, engine-enforced here: a mechanical failure in generation OR
 // evaluation (any judge's Invoke erroring) returns a non-nil error and does NOT
-// count as a rejection or consume the attempt budget. Only a clean evaluation
-// whose verdict is "reject" spends an attempt and triggers repair.
+// count as a rejection or consume the attempt budget. A clean jury rejection or
+// a Candidate.Rejection spends an attempt and triggers repair; the latter skips
+// evaluation entirely.
 func Gate(ctx context.Context, gen Generate, judges []dawn.Backend, system string, quorum, maxAttempts int) (Outcome, error) {
 	var out Outcome
 	feedback := ""
@@ -60,6 +62,11 @@ func Gate(ctx context.Context, gen Generate, judges []dawn.Backend, system strin
 		candidate, err := gen(ctx, feedback)
 		if err != nil {
 			return out, fmt.Errorf("gate: generate attempt %d: %w", attempt, err)
+		}
+		if candidate.Rejection != "" {
+			out = Outcome{Candidate: candidate, Attempts: attempt}
+			feedback = rejectionFeedback(candidate.Rejection)
+			continue
 		}
 		approved, votes := Jury(ctx, judges, system, candidate.Text, quorum)
 		if err := firstErr(votes); err != nil {
@@ -90,11 +97,17 @@ func firstErr(votes []Verdict) error {
 // objections of the judges that voted no. This is what makes repair converge.
 func critique(votes []Verdict) string {
 	var b strings.Builder
-	b.WriteString("A prior version was REJECTED by the review panel. Address every objection:\n")
+	b.WriteString(rejectionHeading)
 	for _, v := range votes {
 		if !v.Approved && v.Reason != "" {
 			fmt.Fprintf(&b, "- %s: %s\n", v.Judge, v.Reason)
 		}
 	}
 	return b.String()
+}
+
+const rejectionHeading = "A prior version was REJECTED by the review panel. Address every objection:\n"
+
+func rejectionFeedback(reason string) string {
+	return rejectionHeading + "- " + reason + "\n"
 }
