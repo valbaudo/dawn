@@ -180,6 +180,48 @@ func TestGatedMissingExpectRepairsBeforeJudging(t *testing.T) {
 	}
 }
 
+func TestGatedMultipleMissingExpectUsesCanonicalOrderAndCommitsAttemptThree(t *testing.T) {
+	var generatorCalls int
+	var generatorPrompts []dawn.Invocation
+	var judgeCalls atomic.Int64
+	p := gated(&Gate{Judges: []string{"x/a", "x/b", "x/c"}, Criteria: "be good"})
+	step := p.Steps["draft"]
+	step.Expect = []string{"z/second", "a/first"}
+	p.Steps["draft"] = step
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"gen": orderedMissingProducer{
+			calls: &generatorCalls, seen: &generatorPrompts,
+			missing: []string{"a/first", "z/second"}, successURI: "tree-attempt-3",
+		},
+		"a": voter{name: "a", approve: true, seen: &judgeCalls},
+		"b": voter{name: "b", approve: true, seen: &judgeCalls},
+		"c": voter{name: "c", approve: true, seen: &judgeCalls},
+	})}
+
+	done, err := r.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("multiple missing paths should repair in canonical order: %v", err)
+	}
+	if generatorCalls != 3 {
+		t.Fatalf("generator calls = %d, want 3", generatorCalls)
+	}
+	for i, inv := range generatorPrompts {
+		if got := strings.Join(inv.Expect, ","); got != "a/first,z/second" {
+			t.Fatalf("attempt %d expect order = %q, want canonical order", i+1, got)
+		}
+	}
+	if !strings.Contains(generatorPrompts[1].Prompt, "a/first") ||
+		!strings.Contains(generatorPrompts[2].Prompt, "z/second") {
+		t.Fatalf("repair feedback did not follow canonical missing order: %#v", generatorPrompts)
+	}
+	if got := judgeCalls.Load(); got != 3 {
+		t.Fatalf("judge calls = %d, want one panel round (3)", got)
+	}
+	if got := done["draft"].Produced["workspace"].URI; got != "tree-attempt-3" {
+		t.Fatalf("committed workspace = %q, want accepted attempt 3", got)
+	}
+}
+
 func TestGatedCaptureErrorRemainsMechanical(t *testing.T) {
 	var generatorCalls int
 	var generatorPrompts []dawn.Invocation
@@ -205,6 +247,109 @@ func TestGatedCaptureErrorRemainsMechanical(t *testing.T) {
 	}
 	if got := judgeCalls.Load(); got != 0 {
 		t.Fatalf("judge calls = %d, want 0", got)
+	}
+}
+
+func TestGatedAllMissingPreservesFinalObjectionWithoutJudgesOrCommit(t *testing.T) {
+	var generatorCalls int
+	var generatorPrompts []dawn.Invocation
+	var judgeCalls atomic.Int64
+	journal, err := OpenJournal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := gated(&Gate{Judges: []string{"x/a", "x/b", "x/c"}, Criteria: "be good"})
+	step := p.Steps["draft"]
+	step.Expect = []string{"a/first", "m/second", "z/final"}
+	p.Steps["draft"] = step
+	r := &Runner{Blobs: store.NewMem(), Journal: journal, Backend: byModel(map[string]dawn.Backend{
+		"gen": orderedMissingProducer{
+			calls: &generatorCalls, seen: &generatorPrompts,
+			missing: []string{"a/first", "m/second", "z/final"},
+		},
+		"a": voter{name: "a", approve: true, seen: &judgeCalls},
+		"b": voter{name: "b", approve: true, seen: &judgeCalls},
+		"c": voter{name: "c", approve: true, seen: &judgeCalls},
+	})}
+
+	done, err := r.Run(context.Background(), p)
+	var rejected *RejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("exhausted missing paths must be a rejection, got %v", err)
+	}
+	if rejected.Attempts != Attempts || generatorCalls != Attempts {
+		t.Fatalf("attempts = %d, generator calls = %d, want %d", rejected.Attempts, generatorCalls, Attempts)
+	}
+	if got := judgeCalls.Load(); got != 0 {
+		t.Fatalf("judge calls = %d, want 0", got)
+	}
+	if !strings.Contains(rejected.Objections, "z/final") {
+		t.Fatalf("final objection lost synthetic reason: %q", rejected.Objections)
+	}
+	if _, committed := done["draft"]; committed {
+		t.Fatal("exhausted rejected step must not commit")
+	}
+	entries, err := journal.Entries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !strings.Contains(entries[0].Rejected, "z/final") {
+		t.Fatalf("journal must preserve final missing path, got %+v", entries)
+	}
+}
+
+func TestUngatedMissingPathErrorRemainsMechanical(t *testing.T) {
+	var calls int
+	var seen []dawn.Invocation
+	missing := &store.MissingPathError{Path: "dist/dawn"}
+	p := &Plan{Steps: map[string]Step{
+		"build": {Agent: "x/gen", Prompt: "build", Expect: []string{"dist/dawn"}},
+	}}
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"gen": captureFailingProducer{calls: &calls, seen: &seen, err: missing},
+	})}
+
+	done, err := r.Run(context.Background(), p)
+	var gotMissing *store.MissingPathError
+	if !errors.As(err, &gotMissing) || gotMissing.Path != "dist/dawn" {
+		t.Fatalf("ungated missing path must remain mechanical, got %v", err)
+	}
+	var rejected *RejectedError
+	if errors.As(err, &rejected) {
+		t.Fatalf("ungated missing path became rejection: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+	if _, committed := done["build"]; committed {
+		t.Fatal("mechanically failed step must not commit")
+	}
+}
+
+func TestMalformedExpectIsAuthorValidationNotRepair(t *testing.T) {
+	var calls int
+	var seen []dawn.Invocation
+	p := &Plan{Steps: map[string]Step{
+		"build": {Agent: "x/gen", Prompt: "build", Expect: []string{"../escape"}, Gate: &Gate{
+			Judges: []string{"x/judge"}, Criteria: "safe",
+		}},
+	}}
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"gen":   captureFailingProducer{calls: &calls, seen: &seen, err: &store.MissingPathError{Path: "../escape"}},
+		"judge": voter{name: "judge", approve: true},
+	})}
+
+	_, err := r.Run(context.Background(), p)
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("malformed expect must be author validation, got %T: %v", err, err)
+	}
+	var rejected *RejectedError
+	if errors.As(err, &rejected) {
+		t.Fatalf("malformed expect entered repair: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("validation must precede generation, calls = %d", calls)
 	}
 }
 
@@ -248,6 +393,27 @@ func (p textProducer) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result
 type treeProducer struct{ producer }
 
 func (treeProducer) CapturesTree() {}
+
+type orderedMissingProducer struct {
+	calls      *int
+	seen       *[]dawn.Invocation
+	missing    []string
+	successURI string
+}
+
+func (p orderedMissingProducer) Name() string  { return "ordered-missing-producer" }
+func (p orderedMissingProducer) CapturesTree() {}
+func (p orderedMissingProducer) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	*p.calls++
+	*p.seen = append(*p.seen, in)
+	if *p.calls <= len(p.missing) {
+		return dawn.Result{}, &store.MissingPathError{Path: p.missing[*p.calls-1]}
+	}
+	return dawn.Result{
+		Output:   conform(in, in.Prompt),
+		Produced: map[string]dawn.Ref{"workspace": {Kind: dawn.KindWorkspace, URI: p.successURI}},
+	}, nil
+}
 
 type captureFailingProducer struct {
 	calls *int

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/valbaudo/dawn/proc"
 )
@@ -40,6 +42,34 @@ type MissingPathError struct{ Path string }
 
 func (e *MissingPathError) Error() string {
 	return fmt.Sprintf("declared path %q was not produced", e.Path)
+}
+
+// ValidateWorkspacePath accepts only normalized relative slash paths confined to
+// a captured workspace. It is exported so plan validation and capture defense use
+// one definition rather than drifting.
+func ValidateWorkspacePath(p string) error {
+	switch {
+	case p == "":
+		return fmt.Errorf("path is empty")
+	case strings.ContainsRune(p, '\\'):
+		return fmt.Errorf("path %q must use forward slashes", p)
+	case path.IsAbs(p):
+		return fmt.Errorf("path %q must be relative", p)
+	case hasVolumePrefix(p):
+		return fmt.Errorf("path %q must not be volume-qualified", p)
+	case p == "." || p == ".." || strings.HasPrefix(p, "../"):
+		return fmt.Errorf("path %q must stay within the workspace", p)
+	case path.Clean(p) != p:
+		return fmt.Errorf("path %q is not normalized", p)
+	case strings.IndexFunc(p, unicode.IsControl) >= 0:
+		return fmt.Errorf("path %q contains control characters", p)
+	default:
+		return nil
+	}
+}
+
+func hasVolumePrefix(p string) bool {
+	return len(p) >= 2 && ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) && p[1] == ':'
 }
 
 // NewTrees opens (creating if needed) a tree store at dir.
@@ -93,6 +123,11 @@ func (t *Trees) Capture(ctx context.Context, workDir string, must ...string) (st
 // Determinism is unaffected: this is a pure function of (workDir bytes, base,
 // must), and a step whose input tree differs already has a different identity key.
 func (t *Trees) CaptureFrom(ctx context.Context, workDir, base string, must ...string) (string, error) {
+	for _, declared := range must {
+		if err := ValidateWorkspacePath(declared); err != nil {
+			return "", fmt.Errorf("store: invalid declared path: %w", err)
+		}
+	}
 	idx, done, err := t.tempIndex()
 	if err != nil {
 		return "", err

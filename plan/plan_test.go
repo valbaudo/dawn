@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func TestLoadRejectsInvalidExpectPaths(t *testing.T) {
+	for name, expect := range map[string]string{
+		"empty":            "",
+		"absolute":         "/tmp/output",
+		"volume-qualified": "C:/output",
+		"dot":              ".",
+		"parent":           "../output",
+		"traversal":        "dist/../output",
+		"not normalized":   "dist//output",
+		"backslash":        `dist\\output`,
+		"newline":          "dist\\noutput",
+		"control":          "dist\\u0001output",
+	} {
+		t.Run(name, func(t *testing.T) {
+			y := head + "  build:\n    agent: x/tree\n    prompt: build\n    expect: [\"" + expect + "\"]\n"
+			if _, err := loadPlan(t, y); err == nil || !strings.Contains(err.Error(), "expect") {
+				t.Fatalf("invalid expect path %q must be rejected as authored plan data, got %v", expect, err)
+			}
+		})
+	}
+}
+
 func TestLoadParsesValidPlan(t *testing.T) {
 	p, err := loadPlan(t, head+
 		"  draft:\n    agent: claude/sonnet\n    prompt: write\n    outputs: {text: string}\n"+

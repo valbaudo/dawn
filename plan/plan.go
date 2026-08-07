@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/valbaudo/dawn/gate"
+	"github.com/valbaudo/dawn/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -178,6 +179,10 @@ func (s Step) Fields() map[string]Type {
 	return s.Outputs
 }
 
+func (s Step) canonicalExpect() []string {
+	return slices.Sorted(slices.Values(s.Expect))
+}
+
 // IDs returns the plan's step ids, sorted — the stable order everything else
 // iterates in, so a map's randomization never reaches execution or a hash.
 func (p *Plan) IDs() []string { return slices.Sorted(maps.Keys(p.Steps)) }
@@ -198,6 +203,11 @@ func (p *Plan) validate() error {
 		}
 		if _, err := ParseAgent(s.Agent); err != nil {
 			return fmt.Errorf("step %q: %w", id, err)
+		}
+		for _, expected := range s.Expect {
+			if err := store.ValidateWorkspacePath(expected); err != nil {
+				return fmt.Errorf("step %q expect %q: %w", id, expected, err)
+			}
 		}
 		for field := range s.Outputs {
 			if why, bad := reserved[field]; bad {

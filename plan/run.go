@@ -383,6 +383,11 @@ func (r *Runner) preflight(p *Plan) (err error) {
 	for _, id := range p.IDs() {
 		s := p.Steps[id]
 		consumer := backends[id]
+		for _, expected := range s.Expect {
+			if err := store.ValidateWorkspacePath(expected); err != nil {
+				return fmt.Errorf("step %q expect %q: %w", id, expected, err)
+			}
+		}
 		if len(s.Expect) > 0 {
 			if _, ok := consumer.(dawn.TreeCapturer); !ok {
 				return fmt.Errorf("step %q declares expect: but agent %q captures no tree", id, s.Agent)
@@ -434,7 +439,7 @@ func (r *Runner) execute(ctx context.Context, id string, s Step, b bound) (dawn.
 	}
 	// The schema is pushed to the agent as an OPTIMIZATION. It is never the
 	// authority: Step.Validate re-checks locally on every backend, always.
-	inv := dawn.Invocation{Prompt: b.prompt, Inputs: b.refs, Schema: s.Schema(), Expect: s.Expect}
+	inv := dawn.Invocation{Prompt: b.prompt, Inputs: b.refs, Schema: s.Schema(), Expect: s.canonicalExpect()}
 
 	var res dawn.Result
 	if s.Gate == nil {
@@ -519,7 +524,11 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.B
 		return dawn.Result{}, err
 	}
 	if !out.Approved {
-		return dawn.Result{}, &RejectedError{Step: id, Attempts: out.Attempts, Objections: objections(out.Votes)}
+		objection := objections(out.Votes)
+		if out.Candidate.Rejection != "" {
+			objection = out.Candidate.Rejection
+		}
+		return dawn.Result{}, &RejectedError{Step: id, Attempts: out.Attempts, Objections: objection}
 	}
 	// Commit the attempt the panel APPROVED, addressed by index — never merely the
 	// last one generated.

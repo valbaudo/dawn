@@ -250,6 +250,33 @@ func TestCaptureFailsOnAMissingDeclaredPath(t *testing.T) {
 	}
 }
 
+func TestCaptureRejectsUnsafeDeclaredPathsMechanically(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	for name, declared := range map[string]string{
+		"empty":            "",
+		"absolute":         "/tmp/output",
+		"volume-qualified": "C:/output",
+		"dot":              ".",
+		"parent":           "../output",
+		"traversal":        "dist/../output",
+		"not normalized":   "dist//output",
+		"backslash":        `dist\output`,
+		"newline":          "dist\noutput",
+		"control":          "dist\x01output",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := tr.Capture(ctx, t.TempDir(), declared)
+			if err == nil {
+				t.Fatalf("unsafe declared path %q must fail", declared)
+			}
+			var missing *MissingPathError
+			if errors.As(err, &missing) {
+				t.Fatalf("unsafe path is configuration, not repairable absence: %v", err)
+			}
+		})
+	}
+}
+
 // A relative working directory must capture correctly. It did not: the command
 // runs with cmd.Dir set to the same path, so a relative GIT_WORK_TREE was
 // resolved twice — `--in examples/calc` went looking for

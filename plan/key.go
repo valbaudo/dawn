@@ -57,7 +57,7 @@ func (s Step) Key(id string, a Agent, resolved map[string]string) (string, error
 		Backend: a.Backend, Model: a.Model,
 		Prompt: s.Prompt,
 		Output: s.Fields(),
-		Expect: slices.Sorted(slices.Values(s.Expect)),
+		Expect: s.canonicalExpect(),
 		Inputs: resolved,
 	}
 	if g := s.Gate; g != nil {
