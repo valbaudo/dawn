@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -126,6 +125,30 @@ func TestShowMissingInIsUsage(t *testing.T) {
 	}
 }
 
+type fixedTreeCapturer struct{ result dawn.Result }
+
+func (f fixedTreeCapturer) Name() string { return "fixed-tree-capturer" }
+func (f fixedTreeCapturer) Invoke(context.Context, dawn.Invocation) (dawn.Result, error) {
+	return f.result, nil
+}
+func (fixedTreeCapturer) CapturesTree() {}
+
+func runCommitted(t *testing.T, p *plan.Plan, backend dawn.Backend) *plan.Runner {
+	t.Helper()
+	journal, err := plan.OpenJournal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &plan.Runner{
+		Blobs: store.NewMem(), Journal: journal,
+		Backend: func(plan.Agent) (dawn.Backend, error) { return backend, nil },
+	}
+	if _, err := r.Run(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestShowRefStreamsTar(t *testing.T) {
 	ctx := context.Background()
 	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "trees"))
@@ -144,37 +167,15 @@ func TestShowRefStreamsTar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	step := plan.Step{Agent: "claude/sonnet", Prompt: "build dawn"}
-	p := &plan.Plan{Steps: map[string]plan.Step{"build": step}}
-	key, err := step.Key("build", plan.Agent{Backend: "claude", Model: "sonnet"}, map[string]string{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	blob, err := json.Marshal(struct {
-		Output   map[string]any      `json:"output"`
-		Produced map[string]dawn.Ref `json:"produced"`
-	}{
+	p := &plan.Plan{Steps: map[string]plan.Step{
+		"build": {Agent: "fake/model", Prompt: "build dawn"},
+	}}
+	r := runCommitted(t, p, fixedTreeCapturer{result: dawn.Result{
 		Output: map[string]any{"text": "built"},
 		Produced: map[string]dawn.Ref{"workspace": {
 			Kind: dawn.KindWorkspace, URI: tree, Media: "application/vnd.git-tree",
 		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	blobs := store.NewMem()
-	blobRef, err := blobs.Put(blob)
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal, err := plan.OpenJournal(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := journal.Append(plan.Entry{Key: key, Ref: blobRef, Step: "build"}); err != nil {
-		t.Fatal(err)
-	}
-	r := &plan.Runner{Blobs: blobs, Journal: journal, Backend: backends(trees)}
+	}})
 
 	var buf bytes.Buffer
 	if err := showRef(ctx, r, p, trees, "build.workspace", &buf); err != nil {
@@ -199,6 +200,50 @@ func TestShowRefStreamsTar(t *testing.T) {
 			}
 			break
 		}
+	}
+}
+
+func TestShowRefWritesScalarToInjectedWriter(t *testing.T) {
+	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &plan.Plan{Steps: map[string]plan.Step{
+		"draft": {Agent: "fake/model", Prompt: "write"},
+	}}
+	r := runCommitted(t, p, fixedTreeCapturer{result: dawn.Result{
+		Output: map[string]any{"text": "exact scalar"},
+	}})
+
+	var buf bytes.Buffer
+	if err := showRef(context.Background(), r, p, trees, "draft.text", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "exact scalar\n"; got != want {
+		t.Fatalf("scalar bytes = %q, want %q", got, want)
+	}
+}
+
+type errorWriter struct{ err error }
+
+func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestShowRefReturnsScalarWriterError(t *testing.T) {
+	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &plan.Plan{Steps: map[string]plan.Step{
+		"draft": {Agent: "fake/model", Prompt: "write"},
+	}}
+	r := runCommitted(t, p, fixedTreeCapturer{result: dawn.Result{
+		Output: map[string]any{"text": "unwritable"},
+	}})
+	sentinel := errors.New("writer failed")
+
+	err = showRef(context.Background(), r, p, trees, "draft.text", errorWriter{sentinel})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("showRef error = %v, want sentinel writer error", err)
 	}
 }
 

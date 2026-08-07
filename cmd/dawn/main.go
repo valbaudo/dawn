@@ -263,8 +263,8 @@ func showRef(ctx context.Context, r *plan.Runner, p *plan.Plan, trees *store.Tre
 	if !ok {
 		return usagef("step %q has no field %q", id, field)
 	}
-	fmt.Fprintln(out, v)
-	return nil
+	_, err = fmt.Fprintln(out, v)
+	return err
 }
 
 // backends maps an agent spec to a concrete backend. `claude` is a prompt-to-JSON
