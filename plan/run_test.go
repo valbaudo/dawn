@@ -189,6 +189,48 @@ type workspaceConsumer struct{ producer }
 
 func (workspaceConsumer) MaterializesWorkspace() {}
 
+func TestStatusRunsTheSamePreflightAsRun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		plan *Plan
+		want string
+	}{
+		{
+			name: "missing root",
+			plan: &Plan{Steps: map[string]Step{
+				"edit": {Agent: "x/workspace", Prompt: "edit", Inputs: map[string]string{"repo": "in.workspace"}},
+			}},
+			want: "--in",
+		},
+		{
+			name: "text backend referenced as workspace",
+			plan: &Plan{Steps: map[string]Step{
+				"draft": {Agent: "x/text", Prompt: "draft"},
+				"edit":  {Agent: "x/workspace", Prompt: "edit", Inputs: map[string]string{"repo": "draft.workspace"}},
+			}},
+			want: "captures no tree",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+				"text": textProducer{calls: &calls}, "workspace": workspaceConsumer{},
+			})}
+			_, err := r.Status(tc.plan)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected preflight error containing %q, got: %v", tc.want, err)
+			}
+			var validation *ValidationError
+			if !errors.As(err, &validation) {
+				t.Fatalf("status preflight failure must be ValidationError, got %T: %v", err, err)
+			}
+			if calls != 0 {
+				t.Fatalf("status must not invoke backends, but %d invocations ran", calls)
+			}
+		})
+	}
+}
+
 func TestPreflightResolvesAllBackendsBeforeCapabilityValidation(t *testing.T) {
 	var calls int
 	var resolved []string

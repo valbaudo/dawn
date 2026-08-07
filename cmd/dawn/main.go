@@ -1,7 +1,7 @@
 // Command dawn runs and inspects agent plans.
 //
 //	dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]… [--jobs N]
-//	dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]…
+//	dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]… [--jobs N]
 //
 // `run` executes the plan's steps in dependency order, committing each step's
 // typed output against its identity key. Re-running IS resuming: a step whose key
@@ -91,7 +91,7 @@ func exitCode(interrupted bool, err error) int {
 		return exitInterrupted
 	case errors.As(err, new(*plan.RejectedError)):
 		return exitRefused
-	case errors.As(err, new(*usageError)):
+	case errors.As(err, new(*usageError)), errors.As(err, new(*plan.ValidationError)):
 		return exitUsage
 	default:
 		return exitMechanical
@@ -105,7 +105,7 @@ func usagef(format string, a ...any) error { return &usageError{fmt.Errorf(forma
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:\n"+
 		"  dawn run  PLAN       [--dir DIR] [--in DIR] [--redo NAME]... [--jobs N]\n"+
-		"  dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]...")
+		"  dawn show PLAN [REF] [--dir DIR] [--in DIR] [--redo NAME]... [--jobs N]")
 	os.Exit(exitUsage)
 }
 
@@ -142,6 +142,10 @@ func execute(ctx context.Context, cmd string, args []string) error {
 	if err != nil {
 		return &usageError{err} // parse/validate: nothing ran, nothing was paid for
 	}
+	redoNames := redo.set()
+	if err := validateRedo(p, redoNames); err != nil {
+		return err
+	}
 
 	blobs, err := store.NewFS(filepath.Join(*dir, "blobs"))
 	if err != nil {
@@ -156,7 +160,7 @@ func execute(ctx context.Context, cmd string, args []string) error {
 		return err
 	}
 
-	r := &plan.Runner{Blobs: blobs, Journal: journal, Redo: redo.set(), Jobs: *jobs, Backend: backends(trees)}
+	r := &plan.Runner{Blobs: blobs, Journal: journal, Redo: redoNames, Jobs: *jobs, Backend: backends(trees)}
 	if *in != "" {
 		tree, err := trees.Capture(ctx, *in)
 		if err != nil {
@@ -192,6 +196,18 @@ func execute(ctx context.Context, cmd string, args []string) error {
 		for _, f := range slices.Sorted(fieldNames(p.Steps[id])) {
 			v, _ := res.Output[f].(string)
 			fmt.Printf("    %s: %s\n", f, oneLine(v))
+		}
+	}
+	return nil
+}
+
+func validateRedo(p *plan.Plan, names map[string]bool) error {
+	for name := range names {
+		if name == "" {
+			return usagef("--redo needs a step name")
+		}
+		if _, ok := p.Steps[name]; !ok {
+			return usagef("--redo names unknown step %q", name)
 		}
 	}
 	return nil
@@ -234,7 +250,7 @@ func showRef(ctx context.Context, r *plan.Runner, p *plan.Plan, trees *store.Tre
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("step %q has no committed result for the current plan; run it first", id)
+		return usagef("step %q has no committed result for the current plan; run it first", id)
 	}
 	if produced, isRef := rec.Produced[field]; isRef {
 		if produced.Kind != dawn.KindWorkspace {
