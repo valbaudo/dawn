@@ -21,6 +21,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -171,7 +172,7 @@ func execute(ctx context.Context, cmd string, args []string) error {
 
 	if cmd == "show" {
 		if len(positional) == 2 {
-			return showRef(ctx, r, p, trees, positional[1])
+			return showRef(ctx, r, p, trees, positional[1], os.Stdout)
 		}
 		return showPlan(r, p)
 	}
@@ -237,7 +238,7 @@ func showPlan(r *plan.Runner, p *plan.Plan) error {
 }
 
 // showRef prints one committed value. A workspace field streams as a tar.
-func showRef(ctx context.Context, r *plan.Runner, p *plan.Plan, trees *store.Trees, ref string) error {
+func showRef(ctx context.Context, r *plan.Runner, p *plan.Plan, trees *store.Trees, ref string, out io.Writer) error {
 	id, field, err := plan.ParseRef(ref)
 	if err != nil {
 		return &usageError{err}
@@ -256,13 +257,13 @@ func showRef(ctx context.Context, r *plan.Runner, p *plan.Plan, trees *store.Tre
 		if produced.Kind != dawn.KindWorkspace {
 			return fmt.Errorf("%s is a %s ref, which has no byte form to print", ref, produced.Kind)
 		}
-		return trees.Archive(ctx, produced.URI, os.Stdout)
+		return trees.Archive(ctx, produced.URI, out)
 	}
 	v, ok := rec.Output[field]
 	if !ok {
 		return usagef("step %q has no field %q", id, field)
 	}
-	fmt.Println(v)
+	fmt.Fprintln(out, v)
 	return nil
 }
 

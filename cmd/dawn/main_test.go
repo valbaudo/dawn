@@ -1,15 +1,21 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/valbaudo/dawn"
 	"github.com/valbaudo/dawn/plan"
+	"github.com/valbaudo/dawn/store"
 )
 
 // The exit code is the entire interface an unattended caller has to the run.
@@ -117,6 +123,82 @@ func TestShowMissingInIsUsage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--in") {
 		t.Fatalf("error should name --in, got: %v", err)
+	}
+}
+
+func TestShowRefStreamsTar(t *testing.T) {
+	ctx := context.Background()
+	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "trees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "bin", "dawn"), []byte("executable bytes\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := trees.Capture(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	step := plan.Step{Agent: "claude/sonnet", Prompt: "build dawn"}
+	p := &plan.Plan{Steps: map[string]plan.Step{"build": step}}
+	key, err := step.Key("build", plan.Agent{Backend: "claude", Model: "sonnet"}, map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := json.Marshal(struct {
+		Output   map[string]any      `json:"output"`
+		Produced map[string]dawn.Ref `json:"produced"`
+	}{
+		Output: map[string]any{"text": "built"},
+		Produced: map[string]dawn.Ref{"workspace": {
+			Kind: dawn.KindWorkspace, URI: tree, Media: "application/vnd.git-tree",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs := store.NewMem()
+	blobRef, err := blobs.Put(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := plan.OpenJournal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Append(plan.Entry{Key: key, Ref: blobRef, Step: "build"}); err != nil {
+		t.Fatal(err)
+	}
+	r := &plan.Runner{Blobs: blobs, Journal: journal, Backend: backends(trees)}
+
+	var buf bytes.Buffer
+	if err := showRef(ctx, r, p, trees, "build.workspace", &buf); err != nil {
+		t.Fatal(err)
+	}
+	tarReader := tar.NewReader(&buf)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			t.Fatal("archive does not contain bin/dawn")
+		}
+		if err != nil {
+			t.Fatalf("read archive: %v", err)
+		}
+		if header.Name == "bin/dawn" {
+			content, err := io.ReadAll(tarReader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(content) != "executable bytes\n" {
+				t.Fatalf("bin/dawn = %q", content)
+			}
+			break
+		}
 	}
 }
 

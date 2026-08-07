@@ -1,9 +1,11 @@
 package store
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,6 +80,49 @@ func TestCaptureMaterializeRoundTrip(t *testing.T) {
 		}
 		if string(got) != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestArchiveRoundTripNamesAndBytes(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	src := t.TempDir()
+	want := map[string]string{
+		"bin/dawn":  "binary bytes\x00\xff",
+		"README.md": "# Dawn\n",
+	}
+	for name, content := range want {
+		writeFile(t, src, name, content)
+	}
+
+	ref, err := tr.Capture(ctx, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	if err := tr.Archive(ctx, ref, &archive); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(map[string]string)
+	tarReader := tar.NewReader(&archive)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read archive: %v", err)
+		}
+		content, err := io.ReadAll(tarReader)
+		if err != nil {
+			t.Fatalf("read %s: %v", header.Name, err)
+		}
+		got[header.Name] = string(content)
+	}
+	for name, content := range want {
+		if got[name] != content {
+			t.Errorf("archive %s = %q, want %q", name, got[name], content)
 		}
 	}
 }
