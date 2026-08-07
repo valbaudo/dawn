@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,6 +142,9 @@ func TestFSDetectsCorruption(t *testing.T) {
 	if _, err := b.Get(ref); err == nil {
 		t.Fatal("Get of a corrupted blob must error, not return the wrong bytes")
 	}
+	if _, err := b.Put([]byte("real content")); err == nil || !strings.Contains(err.Error(), "corruption") {
+		t.Fatalf("re-Put over corrupt final blob = %v, want corruption error", err)
+	}
 }
 
 type failingTempFile struct {
@@ -151,6 +155,10 @@ type failingTempFile struct {
 func (f *failingTempFile) Write(p []byte) (int, error) {
 	if f.fail == "write" {
 		return 0, errors.New("injected write failure")
+	}
+	if f.fail == "short-write" {
+		n, err := f.File.Write(p[:len(p)/2])
+		return n, err
 	}
 	return f.File.Write(p)
 }
@@ -181,6 +189,13 @@ func TestFSPutFailureCleansUp(t *testing.T) {
 			want: "store: write",
 			ops: func(t *testing.T) fsOps {
 				return fsOps{createTemp: failingCreateTemp(t, "write")}
+			},
+		},
+		{
+			name: "short write",
+			want: io.ErrShortWrite.Error(),
+			ops: func(t *testing.T) fsOps {
+				return fsOps{createTemp: failingCreateTemp(t, "short-write")}
 			},
 		},
 		{

@@ -144,11 +144,32 @@ func (t *Trees) CaptureFrom(ctx context.Context, workDir, base string, must ...s
 	}
 	if len(must) > 0 {
 		for _, path := range must {
-			if _, err := os.Lstat(filepath.Join(workDir, filepath.FromSlash(path))); err != nil {
+			declaredPath := filepath.Join(workDir, filepath.FromSlash(path))
+			info, err := os.Lstat(declaredPath)
+			if err != nil {
 				if os.IsNotExist(err) {
 					return "", &MissingPathError{Path: path}
 				}
 				return "", fmt.Errorf("store: inspect declared path %q: %w", path, err)
+			}
+			if info.IsDir() {
+				nonEmpty := false
+				err := filepath.WalkDir(declaredPath, func(current string, entry os.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					if current != declaredPath && !entry.IsDir() {
+						nonEmpty = true
+						return filepath.SkipAll
+					}
+					return nil
+				})
+				if err != nil {
+					return "", fmt.Errorf("store: inspect declared path %q: %w", path, err)
+				}
+				if !nonEmpty {
+					return "", &MissingPathError{Path: path}
+				}
 			}
 		}
 		args := append([]string{"add", "-f", "--"}, must...)
@@ -299,13 +320,25 @@ func (t *Trees) tempIndex() (path string, done func(), err error) {
 	return name, func() { _ = os.Remove(name) }, nil
 }
 
+func isRepositoryGitEnv(upper string) bool {
+	switch upper {
+	case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+		"GIT_PREFIX", "GIT_SUPER_PREFIX", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE":
+		return true
+	default:
+		return false
+	}
+}
+
 func controlledGitEnv() []string {
 	ambient := os.Environ()
 	env := make([]string, 0, len(ambient)+8)
 	for _, entry := range ambient {
 		key, _, _ := strings.Cut(entry, "=")
 		upper := strings.ToUpper(key)
-		if strings.HasPrefix(upper, "GIT_CONFIG_") || upper == "GIT_ATTR_NOSYSTEM" {
+		if strings.HasPrefix(upper, "GIT_CONFIG_") || upper == "GIT_ATTR_NOSYSTEM" || isRepositoryGitEnv(upper) {
 			continue
 		}
 		env = append(env, entry)

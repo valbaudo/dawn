@@ -26,7 +26,7 @@ Create one runner preflight path shared by `Run` and `Status`. Before invoking o
 4. a step receiving a workspace ref uses a backend that can materialize it; and
 5. every configured generator and judge backend resolves.
 
-The CLI separately validates requested `--redo` names after loading the plan and before constructing stores or a runner. Direct callers supply `Runner.Redo`; runner preflight does not validate its keys.
+The CLI validates requested `--redo` names after loading the plan and before constructing stores or a runner. Shared runner preflight repeats empty/unknown redo validation so direct callers receive the same `ValidationError` protection.
 
 These are author/configuration errors. The CLI wraps them as usage errors so both `run` and `show` exit 2. Preflight must complete before any backend invocation.
 
@@ -78,7 +78,7 @@ Exercise archive behavior, executable-bit normalization, malformed refs, `Mem.Ge
 
 ### Kind vocabulary and documentation
 
-`KindWorkspace` is the only kind the current binary emits in `Result.Produced`. Keep `KindValue`, `KindArtifact`, and `KindSession` as reserved, currently unemitted constants for API compatibility; scalar values live in `Result.Output`. Documentation must not describe an independent artifact channel that the binary cannot produce: expected paths may be files or directories, and are forced into a captured workspace.
+`KindWorkspace` is the only kind the current binary emits in `Result.Produced`. Keep `KindValue`, `KindArtifact`, and `KindSession` as reserved, currently unemitted constants for API compatibility; scalar values live in `Result.Output`. Documentation must not describe an independent artifact channel that the binary cannot produce: expected paths may be files or non-empty directories, and are forced into a captured workspace. Existing empty directories are rejected as missing because Git cannot capture them.
 
 Split the fused Claude backend documentation so `DefaultTimeout`, `defaultSystem`, and each exported backend field have accurate adjacent comments. Add argument-capture tests proving the text backend retains `--system-prompt` and the workspace backend retains `--exclude-dynamic-system-prompt-sections`.
 

@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,7 +72,10 @@ func (b *FS) Put(content []byte) (string, error) {
 	ref := Ref(content)
 	path := b.path(ref)
 	if _, err := os.Stat(path); err == nil {
-		return ref, nil // already stored
+		if _, err := b.Get(ref); err != nil {
+			return "", err
+		}
+		return ref, nil // already stored and verified
 	}
 	ops := b.ops.withDefaults()
 	tmp, err := ops.createTemp(b.root, ".tmp-*")
@@ -79,7 +83,11 @@ func (b *FS) Put(content []byte) (string, error) {
 		return "", fmt.Errorf("store: temp: %w", err)
 	}
 	tmpName := tmp.Name()
-	if _, err := tmp.Write(content); err != nil {
+	n, err := tmp.Write(content)
+	if err == nil && n != len(content) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
 		_ = tmp.Close()
 		_ = ops.remove(tmpName)
 		return "", fmt.Errorf("store: write: %w", err)
@@ -100,7 +108,8 @@ func (b *FS) Put(content []byte) (string, error) {
 		_ = ops.remove(tmpName)
 		return "", fmt.Errorf("store: commit: %w", err)
 	}
-	// And fsync the directory, so the rename itself survives a power loss.
+	// Best-effort directory sync improves rename persistence where the platform
+	// supports it. File Sync plus atomic rename are the enforced durability boundary.
 	if dir, err := os.Open(b.root); err == nil {
 		_ = dir.Sync()
 		_ = dir.Close()

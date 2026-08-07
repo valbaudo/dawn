@@ -358,6 +358,15 @@ func (r *Runner) preflight(p *Plan) (err error) {
 		}
 	}()
 
+	for name := range r.Redo {
+		if name == "" {
+			return fmt.Errorf("redo needs a step name")
+		}
+		if _, ok := p.Steps[name]; !ok {
+			return fmt.Errorf("redo names unknown step %q", name)
+		}
+	}
+
 	backends := make(map[string]dawn.Backend, len(p.Steps))
 	for _, id := range p.IDs() {
 		s := p.Steps[id]

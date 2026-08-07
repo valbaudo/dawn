@@ -94,8 +94,10 @@ func TestExecuteClassifiesAuthorErrorsAsUsage(t *testing.T) {
 		{"unknown flag", "run", []string{planPath, "--wat"}, "flag provided but not defined"},
 		{"malformed jobs", "run", []string{planPath, "--jobs", "many"}, "invalid value"},
 		{"zero jobs", "run", []string{planPath, "--jobs", "0"}, "at least 1"},
-		{"unknown redo", "run", []string{planPath, "--dir", state, "--redo", "missing"}, "missing"},
-		{"empty redo", "run", []string{planPath, "--dir", state, "--redo="}, "needs a step name"},
+		{"unknown redo run", "run", []string{planPath, "--dir", state, "--redo", "missing"}, "missing"},
+		{"empty redo run", "run", []string{planPath, "--dir", state, "--redo="}, "needs a step name"},
+		{"unknown redo show", "show", []string{planPath, "--dir", state, "--redo", "missing"}, "missing"},
+		{"empty redo show", "show", []string{planPath, "--dir", state, "--redo="}, "needs a step name"},
 		{"uncommitted show ref", "show", []string{planPath, "draft.text", "--dir", state}, "run it first"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -111,17 +113,85 @@ func TestExecuteClassifiesAuthorErrorsAsUsage(t *testing.T) {
 	}
 }
 
-func TestShowMissingInIsUsage(t *testing.T) {
-	planPath := writePlan(t, "steps:\n  edit:\n    agent: claude-ws/sonnet\n    prompt: edit\n    inputs: {repo: in.workspace}\n")
-	err := execute(context.Background(), "show", []string{planPath, "--dir", t.TempDir()})
-	if !errors.As(err, new(*plan.ValidationError)) {
-		t.Fatalf("expected plan validation error, got %T: %v", err, err)
-	}
-	if exitCode(false, err) != exitUsage {
-		t.Fatalf("missing --in classified as exit %d, want usage", exitCode(false, err))
-	}
-	if !strings.Contains(err.Error(), "--in") {
-		t.Fatalf("error should name --in, got: %v", err)
+type countingBackend struct {
+	calls        *int
+	captures     bool
+	materializes bool
+}
+
+func (b countingBackend) Name() string { return "counting" }
+func (b countingBackend) Invoke(context.Context, dawn.Invocation) (dawn.Result, error) {
+	*b.calls++
+	return dawn.Result{}, errors.New("unexpected invocation")
+}
+
+type countingTreeBackend struct{ countingBackend }
+
+func (countingTreeBackend) CapturesTree()          {}
+func (countingTreeBackend) MaterializesWorkspace() {}
+
+func TestExecutePreflightFailuresAreUsageWithoutBackendInvocation(t *testing.T) {
+	original := backendFactory
+	t.Cleanup(func() { backendFactory = original })
+	for _, failure := range []struct {
+		name string
+		plan string
+		want string
+	}{
+		{
+			name: "missing in",
+			plan: "steps:\n  edit:\n    agent: fake/tree\n    prompt: edit\n    inputs: {repo: in.workspace}\n",
+			want: "--in",
+		},
+		{
+			name: "capability",
+			plan: "steps:\n  draft:\n    agent: fake/text\n    prompt: write\n    expect: [artifact]\n",
+			want: "captures no tree",
+		},
+	} {
+		for _, command := range []struct {
+			name string
+			cmd  string
+			ref  string
+		}{
+			{name: "run", cmd: "run"},
+			{name: "show plan", cmd: "show"},
+			{name: "show plan ref", cmd: "show", ref: "draft.text"},
+		} {
+			t.Run(failure.name+"/"+command.name, func(t *testing.T) {
+				planPath := writePlan(t, failure.plan)
+				var calls int
+				backendFactory = func(*store.Trees) func(plan.Agent) (dawn.Backend, error) {
+					return func(a plan.Agent) (dawn.Backend, error) {
+						base := countingBackend{calls: &calls}
+						if a.Model == "tree" {
+							return countingTreeBackend{base}, nil
+						}
+						return base, nil
+					}
+				}
+				args := []string{planPath}
+				if command.ref != "" {
+					id := "draft"
+					if failure.name == "missing in" {
+						id = "edit"
+					}
+					args = append(args, id+".text")
+				}
+				args = append(args, "--dir", t.TempDir())
+				err := execute(context.Background(), command.cmd, args)
+				var validation *plan.ValidationError
+				if !errors.As(err, &validation) {
+					t.Fatalf("error = %T %v, want ValidationError", err, err)
+				}
+				if exitCode(false, err) != exitUsage || !strings.Contains(err.Error(), failure.want) {
+					t.Fatalf("error = %v, exit=%d; want usage containing %q", err, exitCode(false, err), failure.want)
+				}
+				if calls != 0 {
+					t.Fatalf("preflight failure invoked backend %d times", calls)
+				}
+			})
+		}
 	}
 }
 

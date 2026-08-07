@@ -157,7 +157,7 @@ func execute(ctx context.Context, cmd string, args []string) error {
 		return err
 	}
 
-	r := &plan.Runner{Blobs: blobs, Journal: journal, Redo: redoNames, Jobs: *jobs, Backend: backends(trees)}
+	r := &plan.Runner{Blobs: blobs, Journal: journal, Redo: redoNames, Jobs: *jobs, Backend: backendFactory(trees)}
 	if *in != "" {
 		tree, err := trees.Capture(ctx, *in)
 		if err != nil {
@@ -262,6 +262,10 @@ func showRef(ctx context.Context, r *plan.Runner, p *plan.Plan, trees *store.Tre
 	_, err = fmt.Fprintln(out, v)
 	return err
 }
+
+// backendFactory is a narrow test seam for exercising execute's real preflight
+// without launching a concrete agent process.
+var backendFactory = backends
 
 // backends maps an agent spec to a concrete backend. `claude` is a prompt-to-JSON
 // call; `claude-ws` edits files, which is a privilege posture and therefore a word

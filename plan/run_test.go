@@ -645,6 +645,41 @@ func TestStatusRunsTheSamePreflightAsRun(t *testing.T) {
 	}
 }
 
+func TestRunAndStatusRejectInvalidRedoBeforeBackendUse(t *testing.T) {
+	p := &Plan{Steps: map[string]Step{"draft": {Agent: "x/model", Prompt: "write"}}}
+	for _, tc := range []struct {
+		name string
+		redo map[string]bool
+		want string
+	}{
+		{name: "empty", redo: map[string]bool{"": true}, want: "needs a step name"},
+		{name: "unknown", redo: map[string]bool{"missing": true}, want: "unknown step"},
+	} {
+		for _, operation := range []string{"run", "status"} {
+			t.Run(operation+"/"+tc.name, func(t *testing.T) {
+				var resolved, invoked int
+				r := &Runner{Blobs: store.NewMem(), Redo: tc.redo, Backend: func(Agent) (dawn.Backend, error) {
+					resolved++
+					return textProducer{calls: &invoked}, nil
+				}}
+				var err error
+				if operation == "run" {
+					_, err = r.Run(context.Background(), p)
+				} else {
+					_, err = r.Status(p)
+				}
+				var validation *ValidationError
+				if !errors.As(err, &validation) || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("error = %T %v, want ValidationError containing %q", err, err, tc.want)
+				}
+				if resolved != 0 || invoked != 0 {
+					t.Fatalf("invalid redo used backend: resolved=%d invoked=%d", resolved, invoked)
+				}
+			})
+		}
+	}
+}
+
 func TestPreflightResolvesAllBackendsBeforeCapabilityValidation(t *testing.T) {
 	var calls int
 	var resolved []string

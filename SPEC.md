@@ -192,8 +192,9 @@ rejects empty or unknown `--redo` names.
 **Runner preflight**, after concrete backends are available and before any invocation or
 token spend: every generator and judge resolves; `expect:` and reserved
 `workspace`/`diff` producers capture trees; workspace consumers can materialize them;
-and any referenced `in.workspace` has a root supplied by `--in`. Direct Runner callers
-supply `Runner.Redo`; the runner does not validate those names.
+any referenced `in.workspace` has a root supplied by `--in`; and every `Runner.Redo`
+key names a real, non-empty step id. The CLI also validates `--redo` early, before
+constructing stores, while shared Runner preflight protects direct callers.
 
 **Runtime**, after the agent returns and *before* the step commits: strict-parse, every
 declared field present, enum values members, **no undeclared fields**. Any failure
@@ -217,8 +218,9 @@ step rather than the run.
 
 The workspace tree is the only current file/artifact channel, and **producer path equals
 consumer path** — `dist/dawn` written by `build` is read at `dist/dawn` by `smoke`.
-Expected paths are files or directories forced into that captured workspace, not
-independent `artifact` refs. The public `KindValue`, `KindArtifact`, and `KindSession`
+Expected paths are files or non-empty directories forced into that captured workspace,
+not independent `artifact` refs. Existing empty directories are missing postconditions
+because Git cannot capture them. The public `KindValue`, `KindArtifact`, and `KindSession`
 names remain reserved for future backends; the current binary emits none in
 `Result.Produced`. Scalar values live in `Result.Output`. Every tree-capturing step gets
 its own scratch dir: materialize inputs → run → capture → discard. The supplied host tree

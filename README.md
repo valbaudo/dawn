@@ -125,8 +125,9 @@ directly** — not just consecutive ones. System and personal git configuration
 cannot change capture semantics: dawn disables ambient attributes, line-ending
 conversion, and global excludes while preserving the workspace's `.gitignore`.
 The working directory needs no `.git`; the store is the only repository involved.
-An `expect:` path (a file or directory) is force-added to this workspace tree (even
-when ignored) and must exist; it is not emitted as a separate artifact ref.
+An `expect:` path (a file or non-empty directory) is force-added to this workspace
+tree (even when ignored) and must exist; empty directories are rejected because Git
+cannot capture them. Expected paths are not emitted as separate artifact refs.
 
 ## What it refuses to do
 

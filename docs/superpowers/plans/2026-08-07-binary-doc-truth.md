@@ -683,7 +683,7 @@ Update README to state:
 
 - both commands accept `--dir`, `--in`, `--redo`, and `--jobs`;
 - independent step concurrency is implemented;
-- expected paths may be files or directories and are forced into the workspace tree, not emitted as separate artifact refs;
+- expected paths may be files or non-empty directories and are forced into the workspace tree, not emitted as separate artifact refs; existing empty directories are missing because Git cannot capture them;
 - personal git configuration cannot alter captures;
 - one-run locking and process-group cancellation are Unix guarantees, with non-Unix builds compiling but the lock remaining a no-op;
 - the language summary says four flags, not three.
@@ -694,7 +694,7 @@ Remove concurrency from “Not here yet”; retain only genuinely unbuilt backen
 
 Update SPEC sections for:
 
-- validation terminology: CLI `validateRedo` rejects empty/unknown names before constructing stores or a runner, while shared Runner preflight handles backend resolution, capabilities, and required `--in` roots;
+- validation terminology: CLI `validateRedo` rejects empty/unknown names before constructing stores, while shared Runner preflight also validates redo keys for direct callers and handles backend resolution, capabilities, and required `--in` roots;
 - both `show PLAN` and `show PLAN REF` run shared `Status`/Runner preflight and require `--in` whenever the plan references `in.workspace`;
 - judge evidence: criteria plus resolved generator prompt/input rendering and complete output object;
 - gated missing-path repair and zero judge tokens;

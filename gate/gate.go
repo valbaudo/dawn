@@ -70,8 +70,13 @@ func Judge(ctx context.Context, judge dawn.Backend, system, candidate string) Ve
 		v.Err = fmt.Errorf("judge %s: no boolean \"approved\" in verdict (got %v)", v.Judge, res.Output)
 		return v
 	}
+	reason, ok := res.Output["reason"].(string)
+	if !ok {
+		v.Err = fmt.Errorf("judge %s: no string \"reason\" in verdict (got %v)", v.Judge, res.Output)
+		return v
+	}
 	v.Approved = approved
-	v.Reason, _ = res.Output["reason"].(string)
+	v.Reason = reason
 	return v
 }
 

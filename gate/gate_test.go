@@ -37,7 +37,7 @@ func (f *recordingFakeJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seen = append(f.seen, in)
-	return dawn.Result{Output: map[string]any{"approved": true}}, nil
+	return dawn.Result{Output: map[string]any{"approved": true, "reason": "valid"}}, nil
 }
 
 type mutatingSchemaJudge struct {
@@ -66,7 +66,7 @@ func (j mutatingSchemaJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn
 	approved["type"] = "boolean"
 	reason["type"] = "string"
 	required[0] = "approved"
-	return dawn.Result{Output: map[string]any{"approved": true}}, nil
+	return dawn.Result{Output: map[string]any{"approved": true, "reason": "valid"}}, nil
 }
 
 type checkingSchemaJudge struct {
@@ -101,7 +101,7 @@ func (j checkingSchemaJudge) Invoke(_ context.Context, in dawn.Invocation) (dawn
 	if j.checked != nil {
 		close(j.checked)
 	}
-	return dawn.Result{Output: map[string]any{"approved": true}}, nil
+	return dawn.Result{Output: map[string]any{"approved": true, "reason": "valid"}}, nil
 }
 
 func TestJuryVerdictSchemasAreDeeplyIndependent(t *testing.T) {
@@ -216,6 +216,8 @@ func TestJudgeMalformedVerdictIsErrorNotRejection(t *testing.T) {
 	cases := map[string]map[string]any{
 		"missing approved":  {"reason": "I cannot help with that"},
 		"non-bool approved": {"approved": "yes", "reason": "stringly typed"},
+		"missing reason":    {"approved": true},
+		"non-string reason": {"approved": true, "reason": 42},
 		"empty output":      {},
 	}
 	for name, out := range cases {

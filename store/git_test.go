@@ -14,6 +14,55 @@ import (
 	"time"
 )
 
+func TestControlledGitEnvStripsRepositoryOverridesCaseInsensitively(t *testing.T) {
+	for _, key := range []string{
+		"git_dir", "Git_Work_Tree", "GIT_INDEX_FILE", "git_common_dir",
+		"GIT_OBJECT_DIRECTORY", "git_alternate_object_directories", "GIT_NAMESPACE",
+		"git_ceiling_directories", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX", "GIT_SUPER_PREFIX",
+	} {
+		t.Setenv(key, "hostile")
+	}
+	for _, entry := range controlledGitEnv() {
+		key, _, _ := strings.Cut(entry, "=")
+		if isRepositoryGitEnv(strings.ToUpper(key)) {
+			t.Fatalf("controlled environment retained repository override %q", entry)
+		}
+	}
+}
+
+func TestTreesLifecycleIgnoresInheritedRepositoryEnvironment(t *testing.T) {
+	hostile := filepath.Join(t.TempDir(), "hostile")
+	for _, key := range []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX", "GIT_SUPER_PREFIX",
+	} {
+		t.Setenv(key, hostile)
+	}
+	tr := trees(t) // adversarial environment is present before NewTrees/init
+	ctx := context.Background()
+	src := t.TempDir()
+	writeFile(t, src, "artifact", "safe")
+	ref, err := tr.Capture(ctx, src, "artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := tr.Materialize(ctx, ref, dst); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dst, "artifact")); err != nil || string(got) != "safe" {
+		t.Fatalf("materialized artifact = %q, %v", got, err)
+	}
+	if _, err := tr.Diff(ctx, EmptyTree, ref); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	if err := tr.Archive(ctx, ref, &archive); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func trees(t *testing.T) *Trees {
 	t.Helper()
 	tr, err := NewTrees(filepath.Join(t.TempDir(), "cas"))
@@ -482,6 +531,24 @@ func TestCaptureFailsOnAMissingDeclaredPath(t *testing.T) {
 	}
 	if missing.Path != "dist/never-built" {
 		t.Fatalf("Path = %q", missing.Path)
+	}
+}
+
+func TestCaptureTreatsEmptyDeclaredDirectoryAsMissing(t *testing.T) {
+	tr, ctx := trees(t), context.Background()
+	d := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(d, "dist", "empty", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := tr.Capture(ctx, d, "dist/empty")
+	var missing *MissingPathError
+	if !errors.As(err, &missing) || missing.Path != "dist/empty" {
+		t.Fatalf("empty directory error = %T %v, want MissingPathError", err, err)
+	}
+
+	writeFile(t, d, "dist/non-empty/artifact", "bytes")
+	if _, err := tr.Capture(ctx, d, "dist/non-empty"); err != nil {
+		t.Fatalf("non-empty declared directory must be capturable: %v", err)
 	}
 }
 
