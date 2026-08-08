@@ -9,6 +9,49 @@ carries every kind of state a step needs. No sessions, no templating, no control
 
 **10 keys · 2 type forms · 2 commands · 4 flags.**
 
+---
+
+## Trust, decided once
+
+> **The plan file is code you chose to run. Every byte an agent emits is untrusted data.**
+
+Two sentences, and every mechanism in this document follows from which side of them
+it sits on.
+
+The plan is trusted: it names binaries, it hands an agent a directory, and dawn does
+not sanitize what an author wrote any more than `make` sanitizes a Makefile. An author
+who writes a destructive prompt gets a destructive run.
+
+Agent output is data, never instruction and never authority. It cannot become a verdict
+by looking like one, cannot become a path by containing slashes, and cannot become a
+control character in dawn's own output. That is why the verdict arrives on a channel
+the prose cannot reach, why a declared path is a literal path and never a pattern, and
+why a judge is shown declared fields rather than dawn's rendering of a whole tree.
+
+**What this is NOT.** The agent *process* is not confined. It runs with
+`--dangerously-skip-permissions`, and an absolute path, a `cd ..`, or any subprocess it
+spawns writes wherever the uid can. Isolation here is allocation — a fresh directory per
+invocation so two of your own steps cannot collide — and never containment (§8). Point
+dawn at a tree you are willing to let an agent change.
+
+**Where a guarantee is partial, this document says so at the mechanism**, in the same
+sentence, rather than in a caveats section nobody reads. A reader should be able to work
+out the residual risk without trusting the summary.
+
+---
+
+## The documents win
+
+**If the code contradicts this file, the code is wrong.** Changing what dawn promises is
+a separate, deliberate edit to this file, made before or instead of the code change —
+never a repair applied afterwards to make a sentence true again.
+
+The rule exists because it was missing. Four rounds of adversarial audit found sentences
+here that were false of the binary, and every round edited the prose to match the code
+and moved on. Nobody asked why a document kept being wrong about its own program. With
+no rule about which side wins, "the spec says X and the code does Y" has no answer, so
+the cheapest edit always wins and the spec decays into a changelog of whatever shipped.
+
 > **Work is input-addressed. Values are content-addressed.**
 > A step's identity is a claim about the *question asked*; a ref is a claim about the
 > *bytes produced*. A cache hit means "we already paid for an **accepted** answer to
@@ -68,7 +111,7 @@ never declarable. The step id `in` is reserved and filled by `--in DIR`.
   behavior and makes the cost preview exact.
 - **A judge sees** the gate criteria as its system instruction and deterministic
   evidence containing the resolved generator prompt (rendered scalar inputs included)
-  plus the complete validated output object. Workspace refs and the generator
+  plus the step's declared output fields. Workspace refs and the generator
   transcript are not included, and neither is the **repair critique** — that is the
   panel's own prior verdicts, attributed by judge name, so feeding it back would let
   round 2 read round 1 and make the panel dependent on itself in exactly the way that
@@ -76,16 +119,18 @@ never declarable. The step id `in` is reserved and filled by `--in DIR`.
   evidence does not, apart from the candidate. Every judge receives identical bytes in
   a fresh context against an engine-fixed verdict schema.
 
-  **Both routes, not one.** Cleaning the prompt alone left the OUTPUT map carrying the
-  same bytes: `diff` is reserved and computed by dawn from the whole tree delta, so an
-  agent doing the most ordinary thing there is — writing down what it was asked to fix —
-  put round 1's verdicts into round 2's evidence. dawn strips its own critique from the
-  rendered evidence, verbatim, because those are strings dawn produced and can recognize.
-  The committed result keeps the real diff: what the store records is state, what the
-  panel reads is evidence. Scoped honestly — a generator that PARAPHRASES an objection is
-  not a channel dawn opened, and no string match could close it. The guarantee is that
-  dawn never carries a verdict back to the panel, not that no judge could ever infer that
-  an earlier round happened.
+  **A judge sees DECLARED fields only.** The reserved `diff` is excluded, and that
+  exclusion is what keeps the panel independent of itself. `diff` is dawn's rendering of
+  the whole tree delta, so an agent doing the most ordinary thing there is — writing down
+  what it was asked to fix — would put round 1's verdicts into round 2's evidence.
+  Tried first and abandoned: scrubbing the critique out of the output before showing it.
+  It leaked through partial lines, JSON escaping, non-string values, and a replacement
+  ordering bug. Removing text from text an agent controls is not a winnable game. So the
+  channel closes instead, which is where §4 already pointed: to gate an artifact's
+  content, declare a text rendering of it as an output field and write the criteria
+  against that. A declared field is one the author chose to show the panel; the raw diff
+  never was. The committed result still carries the real diff — what the store records is
+  state, what the panel reads is evidence.
 - **Crash ≠ verdict.** A mechanical judge failure propagates; it never consumes an
   attempt and never reads as approval.
 - **Identity** = hash(step id, backend, model, prompt, resolved `outputs`, `expect`,

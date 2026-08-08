@@ -197,6 +197,32 @@ func TestJuryErrorIsNotApproval(t *testing.T) {
 	}
 }
 
+// The denominator is the COHORT, never the survivors. If broken judges shrank
+// the panel, a quorum of 2 could be met by one approval once two judges crashed
+// — the panel would look unanimous and would in fact be a single vote. The
+// author asked for two agreements out of three; crashes do not renegotiate that.
+func TestACrashedJudgeDoesNotShrinkTheQuorum(t *testing.T) {
+	judges := []dawn.Backend{
+		fakeJudge{name: "a", approved: true},
+		fakeJudge{name: "b", err: errors.New("boom")},
+		fakeJudge{name: "c", err: errors.New("boom")},
+	}
+	approved, votes := Jury(context.Background(), judges, "s", "c", Majority(3))
+	if approved {
+		t.Fatal("one approval and two crashes must not reach a quorum of two")
+	}
+	if len(votes) != 3 {
+		t.Fatalf("votes = %d, want one per judge in the cohort", len(votes))
+	}
+	// And the same shape with a malformed verdict rather than a transport error:
+	// "did not answer" and "answered unusably" are the same non-vote.
+	judges[1] = malformedJudge{"b", map[string]any{"reason": "prose only"}}
+	judges[2] = malformedJudge{"c", map[string]any{"approved": "yes"}}
+	if approved, _ = Jury(context.Background(), judges, "s", "c", Majority(3)); approved {
+		t.Fatal("one approval and two unusable verdicts must not reach a quorum of two")
+	}
+}
+
 // malformedJudge returns a well-formed Result whose Output has no usable
 // "approved" field — what a CLI adapter produces when the model replies with
 // prose (a refusal, a rate-limit notice, a chatty preamble).

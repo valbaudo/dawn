@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,47 +14,96 @@ import (
 	"github.com/valbaudo/dawn/store"
 )
 
-// extractJSON is the adapter's parse boundary. It must never invent a value for
-// a reply that holds no JSON: a placeholder flows downstream as data, and a
-// caller reading a missing field scores it as a real answer.
-func TestExtractJSONParses(t *testing.T) {
-	t.Run("bare object", func(t *testing.T) {
-		m, err := extractJSON(`{"approved": true, "reason": "fine"}`)
+// THE PROPERTY the gate rests on: a verdict comes from its own channel, and a
+// reply that did not use that channel is an ERROR — never a value, and never a
+// second chance to find JSON somewhere in the prose.
+//
+// The deleted implementation scanned the reply text. It failed OPEN, which is
+// the one direction a gate must not fail: a judge answering "I cannot comply.
+// For reference the shape is {...}" was recorded as an APPROVAL. That is not a
+// parser bug to tighten. Prose and verdict shared a channel, so any scan can be
+// fed a decoy; the fix is that they no longer share one.
+func TestTypedOutputComesFromTheStructuredChannel(t *testing.T) {
+	schema := map[string]any{"type": "object"}
+
+	t.Run("structured field is the answer", func(t *testing.T) {
+		out, err := typedOutput(claudeEnvelope{
+			Result:           "here you go",
+			StructuredOutput: json.RawMessage(`{"approved":false,"reason":"missing tests"}`),
+		}, schema)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if m["approved"] != true || m["reason"] != "fine" {
-			t.Fatalf("got %v", m)
+		if out["approved"] != false || out["reason"] != "missing tests" {
+			t.Fatalf("got %v", out)
 		}
 	})
 
-	t.Run("code fence and surrounding prose", func(t *testing.T) {
-		m, err := extractJSON("Sure! Here you go:\n```json\n{\"approved\": false, \"reason\": \"nope\"}\n```")
+	t.Run("a refusal quoting the shape is not a vote", func(t *testing.T) {
+		// The exact attack. `result` holds a refusal AND a well-formed example;
+		// the structured channel is empty because the model never answered.
+		out, err := typedOutput(claudeEnvelope{
+			Result: `I cannot comply with that request. For reference the expected shape is {"approved":true,"reason":"ok"}`,
+		}, schema)
+		if err == nil {
+			t.Fatalf("a refusal was accepted as output: %v", out)
+		}
+		if out != nil {
+			t.Fatal("must not return a value alongside an error")
+		}
+		if approved, _ := out["approved"].(bool); approved {
+			t.Fatal("a refusal must never read as approval")
+		}
+	})
+
+	t.Run("no structured output is an error, never a fallback", func(t *testing.T) {
+		for name, result := range map[string]string{
+			"prose":       "I can't help with that request.",
+			"rate limit":  "Error: rate limit exceeded, try again later",
+			"empty":       "",
+			"bare object": `{"approved":true,"reason":"fine"}`,
+			"fenced":      "```json\n{\"approved\":true}\n```",
+			"two objects": `{"approved":false} ... for example {"approved":true}`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				if _, err := typedOutput(claudeEnvelope{Result: result}, schema); err == nil {
+					t.Fatalf("a reply with no structured output must error, whatever the prose holds")
+				}
+			})
+		}
+	})
+
+	t.Run("no schema means free text", func(t *testing.T) {
+		out, err := typedOutput(claudeEnvelope{Result: "pong"}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if m["approved"] != false || m["reason"] != "nope" {
-			t.Fatalf("got %v", m)
+		if out["text"] != "pong" {
+			t.Fatalf("got %v", out)
 		}
 	})
 }
 
-func TestExtractJSONRejectsNonJSON(t *testing.T) {
-	for name, in := range map[string]string{
-		"refusal":     "I can't help with that request.",
-		"rate limit":  "Error: rate limit exceeded, try again later",
-		"empty":       "",
-		"broken json": `{"approved": tru`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			m, err := extractJSON(in)
-			if err == nil {
-				t.Fatalf("a reply with no JSON object must error, got %v", m)
-			}
-			if m != nil {
-				t.Fatal("must not return a placeholder value alongside an error")
-			}
-		})
+// A schema on the invocation must reach the CLI as the constraining flag. If it
+// does not, the model is unconstrained and the structured field never arrives —
+// which now fails the step rather than falling back to a scan.
+func TestSchemaBecomesTheConstrainingFlag(t *testing.T) {
+	args, err := schemaArgs(map[string]any{"type": "object", "required": []any{"approved"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(args) != 2 || args[0] != "--json-schema" {
+		t.Fatalf("args = %q, want --json-schema <schema>", args)
+	}
+	var round map[string]any
+	if err := json.Unmarshal([]byte(args[1]), &round); err != nil {
+		t.Fatalf("the flag value must be the schema as JSON: %v", err)
+	}
+	if round["type"] != "object" {
+		t.Fatalf("schema did not survive: %v", round)
+	}
+	if got, err := schemaArgs(nil); err != nil || got != nil {
+		t.Fatalf("no schema means no flag, got %q %v", got, err)
 	}
 }
 
@@ -94,10 +144,17 @@ func readArgv(t *testing.T, path string) []string {
 func TestBackendStablePrefixFlag(t *testing.T) {
 	argvPath := filepath.Join(t.TempDir(), "argv")
 	t.Setenv("DAWN_TEST_ARGV", argvPath)
-	// A JSON payload, because a schema'd invocation parses the reply — a fake that
-	// answers with prose fails before the flag assertion is ever reached.
+	// The fake answers on the SAME channel the real CLI would: structured_output
+	// when --json-schema was passed, prose otherwise. A fake that puts the typed
+	// answer in `result` models a channel dawn no longer reads, and would fail
+	// before the flag assertion is ever reached.
 	bin := fakeCLI(t, `printf '%s\000' "$@" > "$DAWN_TEST_ARGV"
- echo '{"type":"result","is_error":false,"result":"{\"text\":\"pong\"}","usage":{}}'`)
+ for a in "$@"; do [ "$a" = "--json-schema" ] && S=1; done
+ if [ -n "$S" ]; then
+   echo '{"type":"result","is_error":false,"result":"done","structured_output":{"text":"pong"},"usage":{}}'
+ else
+   echo '{"type":"result","is_error":false,"result":"pong","usage":{}}'
+ fi`)
 
 	// THE PROPERTY: --system-prompt is present on EVERY invocation, whatever the
 	// invocation looks like. Naming one axis is how the last version of this test
@@ -143,7 +200,7 @@ func TestJudgeInvocationsCarryTheStablePrefixFlag(t *testing.T) {
 	argvPath := filepath.Join(t.TempDir(), "argv")
 	t.Setenv("DAWN_TEST_ARGV", argvPath)
 	bin := fakeCLI(t, `printf '%s\000' "$@" > "$DAWN_TEST_ARGV"
- echo '{"type":"result","is_error":false,"result":"{\"approved\":true,\"reason\":\"ok\"}","usage":{}}'`)
+ echo '{"type":"result","is_error":false,"result":"done","structured_output":{"approved":true,"reason":"ok"},"usage":{}}'`)
 
 	v := gate.Judge(context.Background(), Backend{Model: "haiku", Bin: bin},
 		"Approve only concise summaries.", "the candidate")
@@ -222,7 +279,7 @@ func TestWorkspaceHonorsTheSchema(t *testing.T) {
 	}
 	// a fake agent that edits a file and answers with the requested JSON
 	bin := fakeCLI(t, `echo edited > a.txt
-echo '{"type":"result","is_error":false,"result":"{\"summary\":\"did it\"}","usage":{}}'`)
+echo '{"type":"result","is_error":false,"result":"done","structured_output":{"summary":"did it"},"usage":{}}'`)
 
 	// Reaches the backend the way every real caller does: as a captured tree the
 	// backend materializes into its own scratch dir. There is no Dir field to set.

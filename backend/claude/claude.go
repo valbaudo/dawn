@@ -48,10 +48,16 @@ func (b Backend) Name() string {
 }
 
 // claudeEnvelope is the subset of `claude -p --output-format json` we read.
+//
+// StructuredOutput is the whole point. When the call passes --json-schema, the
+// CLI returns the typed object in its OWN field, and `result` keeps the prose.
+// Prose and verdict stop sharing a channel, which is what makes a refusal
+// unable to impersonate an answer.
 type claudeEnvelope struct {
-	Result  string `json:"result"`
-	IsError bool   `json:"is_error"`
-	Usage   struct {
+	Result           string          `json:"result"`
+	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
+	IsError          bool            `json:"is_error"`
+	Usage            struct {
 		InputTokens         int `json:"input_tokens"`
 		OutputTokens        int `json:"output_tokens"`
 		CacheReadTokens     int `json:"cache_read_input_tokens"`
@@ -85,7 +91,7 @@ func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, e
 	if system == "" {
 		system = defaultSystem
 	}
-	prompt, err := withSchema(in.Prompt, in.Schema)
+	schemaFlags, err := schemaArgs(in.Schema)
 	if err != nil {
 		return dawn.Result{}, err
 	}
@@ -97,12 +103,13 @@ func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, e
 	// proc.Command, not exec.CommandContext: claude spawns tool subprocesses that
 	// inherit stdout, and killing only the direct child leaves the pipe open, so
 	// a timeout would hang instead of firing.
-	cmd := proc.Command(ctx, bin, "-p", prompt,
+	args := append([]string{"-p", in.Prompt,
 		"--model", model,
 		"--output-format", "json", "--system-prompt", system,
 		// dawn never resumes a session, so persisting one per invocation only
 		// litters ~/.claude/projects with a directory per call.
-		"--no-session-persistence")
+		"--no-session-persistence"}, schemaFlags...)
+	cmd := proc.Command(ctx, bin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -117,7 +124,7 @@ func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, e
 		return dawn.Result{}, fmt.Errorf("claude: reported error: %s", env.Result)
 	}
 
-	output, err := parseReply(env.Result, in.Schema)
+	output, err := typedOutput(env, in.Schema)
 	if err != nil {
 		return dawn.Result{}, err
 	}
@@ -132,49 +139,49 @@ func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, e
 	}, nil
 }
 
-// extractJSON pulls the first {...} object out of a model reply, tolerating code
-// fences and surrounding prose. A reply that holds no JSON object is an ERROR,
-// never a value: returning a placeholder here (the old {"_unparsed": ...}) let a
-// refusal or a rate-limit message flow downstream as if it were data, where a
-// caller reading a missing field would score it as a legitimate answer.
-func extractJSON(s string) (map[string]any, error) {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	if i := strings.IndexByte(s, '{'); i >= 0 {
-		if j := strings.LastIndexByte(s, '}'); j > i {
-			var m map[string]any
-			if err := json.Unmarshal([]byte(s[i:j+1]), &m); err == nil {
-				return m, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("claude: reply contained no JSON object: %s", elide(strings.TrimSpace(s), 200))
-}
-
-// withSchema appends the typed-output contract to a prompt. Shared by both
-// backends: they diverged once — the workspace backend returned a fixed field set
-// and ignored the schema entirely, so a step declaring its own outputs failed
-// validation on the backend's own keys.
-func withSchema(prompt string, schema map[string]any) (string, error) {
+// schemaArgs asks the CLI to constrain the reply, so dawn never has to find a
+// verdict inside prose.
+//
+// The deleted alternative was a parser: strip fences, take the first `{` to the
+// last `}`, hope. It failed OPEN, which is the one direction a gate must never
+// fail. Measured: a judge replying `I cannot comply. For reference the shape is
+// {"approved":true,"reason":"ok"}` was recorded as an APPROVAL — a refusal
+// counted as a vote to ship. No parser fixes that, because the refusal and the
+// verdict are the same bytes on the same channel; a better scan only changes
+// which decoy wins. (The mature predecessor kept the scan and has the same bug,
+// and its right-bias makes it worse: a real rejection followed by an example is
+// overwritten BY the example.)
+//
+// So the parser is gone and there is no fallback. If a schema was requested and
+// the CLI returned no structured field, that is an error. A missing channel must
+// never quietly become the old channel — that is how a fail-open comes back.
+func schemaArgs(schema map[string]any) ([]string, error) {
 	if schema == nil {
-		return prompt, nil
+		return nil, nil
 	}
-	hint, err := json.Marshal(schema)
+	encoded, err := json.Marshal(schema)
 	if err != nil {
-		return "", fmt.Errorf("claude: bad schema: %w", err)
+		return nil, fmt.Errorf("claude: bad schema: %w", err)
 	}
-	return prompt + "\n\nRespond with ONLY one JSON object matching this schema — no prose, no code fences:\n" + string(hint), nil
+	return []string{"--json-schema", string(encoded)}, nil
 }
 
-// parseReply turns a CLI reply into typed output, honoring the declared schema.
-// The `diff` key is added by a tree-capturing caller and is RESERVED, so a plan
-// may reference it without declaring it.
-func parseReply(reply string, schema map[string]any) (map[string]any, error) {
+// typedOutput reads the reply the CLI was told to constrain. The `diff` key is
+// added by a tree-capturing caller and is RESERVED, so a plan may reference it
+// without declaring it.
+func typedOutput(env claudeEnvelope, schema map[string]any) (map[string]any, error) {
 	if schema == nil {
-		return map[string]any{"text": reply}, nil
+		return map[string]any{"text": env.Result}, nil
 	}
-	return extractJSON(reply)
+	if len(env.StructuredOutput) == 0 {
+		return nil, fmt.Errorf("claude: --json-schema was requested but the reply carried no structured output; refusing to read a verdict out of prose: %s",
+			elide(strings.TrimSpace(env.Result), 200))
+	}
+	var out map[string]any
+	if err := json.Unmarshal(env.StructuredOutput, &out); err != nil {
+		return nil, fmt.Errorf("claude: structured output is not an object: %w", err)
+	}
+	return out, nil
 }
 
 // timeoutOr resolves a zero timeout to the default.

@@ -73,10 +73,13 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 	if model == "" {
 		model = w.Model
 	}
-	prompt, err := withSchema(in.Prompt, in.Schema)
+	schemaFlags, err := schemaArgs(in.Schema)
 	if err != nil {
 		return dawn.Result{}, err
 	}
+	// This backend cannot use --system-prompt (it needs Claude Code's own preset
+	// for the file tools), so a caller-supplied System is prepended to the prompt.
+	prompt := in.Prompt
 	if in.System != "" {
 		prompt = in.System + "\n\n" + prompt
 	}
@@ -120,9 +123,10 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 	// the drift that defeats prefix caching. Its own documentation says it
 	// "improves cross-user prompt-cache reuse"; it is ignored with --system-prompt,
 	// which is why the two backends take different routes to the same property.
-	cmd := proc.Command(ctx, bin, "-p", prompt, "--model", model,
+	args := append([]string{"-p", prompt, "--model", model,
 		"--output-format", "json", "--dangerously-skip-permissions", "--exclude-dynamic-system-prompt-sections",
-		"--no-session-persistence")
+		"--no-session-persistence"}, schemaFlags...)
+	cmd := proc.Command(ctx, bin, args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -153,7 +157,7 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 	// RESERVED name a plan may reference without declaring. `base` and the raw
 	// tree stay internal: the tree is already the workspace ref below, and a
 	// backend field that is neither declarable nor reserved would fail validation.
-	output, err := parseReply(env.Result, in.Schema)
+	output, err := typedOutput(env, in.Schema)
 	if err != nil {
 		return dawn.Result{}, err
 	}

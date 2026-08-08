@@ -137,11 +137,20 @@ cannot capture them. Expected paths are not emitted as separate artifact refs.
 A judge that could not return a verdict has not voted. If an evaluator errors, or
 replies with prose instead of the requested JSON, `gate` surfaces a mechanical
 failure — it does not score it as a rejection, does not consume a repair attempt,
-and never reads it as approval. The same rule holds at the adapter boundary: a
-reply containing no JSON object is an error, never a placeholder value that flows
-downstream as data. Most review-gate implementations in the wild fail *open* (a
-broken reviewer lets the work through), which is a reasonable choice when a human
-is watching and the wrong one when nobody is.
+and never reads it as approval. Most review-gate implementations in the wild fail
+*open* (a broken reviewer lets the work through), which is a reasonable choice
+when a human is watching and the wrong one when nobody is.
+
+**A verdict arrives on its own channel, so prose cannot impersonate one.** dawn
+asks the CLI to constrain the reply and reads the typed field it returns; it does
+not look for JSON inside the text. It used to, and it failed open in exactly the
+direction that matters: a judge answering *"I cannot comply. For reference the
+shape is `{"approved":true,...}`"* was recorded as an **approval** — a refusal
+counted as a vote to ship. That is not a parser to tighten. While the refusal and
+the verdict are the same bytes on the same channel, any scan can be handed a
+decoy, and a cleverer scan only changes which decoy wins. If the CLI returns no
+structured field, the step fails; there is deliberately no fallback, because a
+missing channel quietly becoming the old channel is how a fail-open comes back.
 
 Timeouts have to actually fire, too. An agent CLI spawns tool subprocesses that
 inherit its stdout, so killing the CLI alone leaves the pipe open and a cancelled

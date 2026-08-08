@@ -582,7 +582,7 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.B
 		// silently-green dependence §2 forbids. A judge votes on the work, never on
 		// what the panel already said about it. Refs stay in Invocation.Inputs and
 		// must never leak into this textual evidence.
-		text, err := judgeEvidence(inv.Prompt, res.Output, feedback)
+		text, err := judgeEvidence(inv.Prompt, res.Output)
 		if err != nil {
 			return gate.Candidate{}, err
 		}
@@ -613,58 +613,42 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.B
 // judgeEvidence renders one complete, deterministic account of what the
 // generator was asked and the validated object it returned. MarshalIndent sorts
 // map keys, keeping repeated jury calls byte-identical.
-func judgeEvidence(prompt string, output map[string]any, feedback string) (string, error) {
-	body, err := json.MarshalIndent(redactVerdicts(output, feedback), "", "  ")
+// judgeEvidence renders what a panel votes on: the resolved generator request
+// and the step's DECLARED outputs.
+//
+// The reserved `diff` is excluded, and that exclusion is the whole mechanism
+// that keeps a panel independent of itself. `diff` is dawn's own rendering of
+// the entire tree delta, so an agent doing the most ordinary thing there is —
+// writing down what it was asked to fix — put round 1's verdicts, judge names
+// and all, into round 2's evidence.
+//
+// The previous answer was a scrubber: delete the critique's lines from the
+// output before showing it. It was patched twice and leaked twice — partial
+// lines when the agent dropped dawn's `- judge: ` prefix, JSON escaping,
+// non-string values, and an ordering bug where one judge's line prefixing
+// another's destroyed the longer pattern and let the second verdict through
+// verbatim. That is not a sequence of oversights. Removing text from text that
+// an agent controls is not a winnable game, and every patch made the next leak
+// harder to see.
+//
+// So the channel closes instead. SPEC §4 already said where this lands: "the
+// panel judges a rendering, not bytes... To gate an artifact's content, declare
+// a text rendering of it as an output field and write the criteria against
+// that." A declared field is something the plan author chose to show the panel.
+// The raw diff never was.
+func judgeEvidence(prompt string, output map[string]any) (string, error) {
+	shown := make(map[string]any, len(output))
+	for k, v := range output {
+		if _, isReserved := reserved[k]; isReserved {
+			continue
+		}
+		shown[k] = v
+	}
+	body, err := json.MarshalIndent(shown, "", "  ")
 	if err != nil {
 		return "", err
 	}
 	return "Generator request:\n" + prompt + "\n\nCaptured output:\n" + string(body), nil
-}
-
-const redacted = "[panel verdict redacted]"
-
-// redactVerdicts removes the panel's own critique from the evidence dawn is about
-// to hand the panel.
-//
-// Passing `inv.Prompt` instead of the attempt's cleans the FIRST of two routes.
-// The second is the output map, and specifically the reserved `diff`: dawn
-// computes that itself from the whole tree delta, so an agent that does the most
-// ordinary thing in the world — writing down what it was asked to fix — puts the
-// round-1 verdicts, judge names and all, into round 2's evidence. dawn built
-// those bytes and dawn delivers them, so dawn removes them.
-//
-// Scoped honestly. This strips the critique lines VERBATIM, because those are
-// strings dawn produced and can therefore recognize. A generator that paraphrases
-// an objection in its own words is not a channel dawn opened and is not something
-// string matching could close; the guarantee is "dawn never carries a verdict
-// back to the panel", not "no judge can ever infer that an earlier round existed".
-//
-// The committed result keeps the real diff — this rewrites a copy for the jury
-// only, because what the store records is state and what the panel reads is
-// evidence.
-func redactVerdicts(output map[string]any, feedback string) map[string]any {
-	var lines []string
-	for _, l := range strings.Split(feedback, "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			lines = append(lines, l)
-		}
-	}
-	if len(lines) == 0 {
-		return output
-	}
-	clean := make(map[string]any, len(output))
-	for k, v := range output {
-		s, ok := v.(string)
-		if !ok {
-			clean[k] = v
-			continue
-		}
-		for _, l := range lines {
-			s = strings.ReplaceAll(s, l, redacted)
-		}
-		clean[k] = s
-	}
-	return clean
 }
 
 // objections summarizes why a panel refused, for the step's error and its journal

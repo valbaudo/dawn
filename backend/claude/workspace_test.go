@@ -112,7 +112,7 @@ func TestWorkspaceKeepsAnUpstreamArtifactItDidNotDeclare(t *testing.T) {
 
 	// step B: edits source only, declares nothing
 	bin := fakeCLI(t, `echo 'package main // fixed' > main.go
-echo '{"type":"result","is_error":false,"result":"{\"summary\":\"fixed it\"}","usage":{}}'`)
+echo '{"type":"result","is_error":false,"result":"done","structured_output":{"summary":"fixed it"},"usage":{}}'`)
 	w := Workspace{Model: "haiku", Bin: bin, Trees: trees}
 	res, err := w.Invoke(ctx, dawn.Invocation{
 		Prompt: "fix main.go",
