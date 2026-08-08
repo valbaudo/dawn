@@ -19,6 +19,42 @@ jobs:
       - run: go test -race ./...
       - run: go vet ./...
 
+  # A cross-BUILD cannot catch the lock bug that matters. Excluding solaris also
+  # excluded illumos (Go sets the `solaris` tag for it) even though illumos HAS
+  # flock — and the build stayed green, because the no-op compiles everywhere.
+  # Green meant "it compiles", never "it locks". So assert WHICH file each
+  # platform selects, against the known flock-availability set.
+  lock-build-tags:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: the flock platforms get the real lock, the rest get the no-op
+        run: |
+          set -eu
+          fail=0
+          check() {
+            got=$(GOOS=$1 GOARCH=$2 go list -f '{{range .GoFiles}}{{.}} {{end}}' ./plan \
+                  | tr ' ' '\n' | grep '^lock_' || echo NONE)
+            if [ "$got" != "$3" ]; then
+              echo "FAIL $1/$2: selected $got, want $3"; fail=1
+            else
+              echo "ok   $1/$2: $got"
+            fi
+          }
+          # Has syscall.Flock -> must select the real implementation.
+          for t in linux/amd64 darwin/arm64 freebsd/amd64 netbsd/amd64 \
+                   openbsd/amd64 dragonfly/amd64 illumos/amd64; do
+            check "${t%/*}" "${t#*/}" lock_unix.go
+          done
+          # No syscall.Flock -> must select the no-op, and must still build.
+          for t in solaris/amd64 aix/ppc64 windows/amd64 plan9/amd64 js/wasm; do
+            check "${t%/*}" "${t#*/}" lock_other.go
+          done
+          exit $fail
+
   # Every platform whose build-tagged file differs, not just Windows. The lock
   # split is `unix && !solaris && !aix` vs the rest, and process groups split
   # again — so a job that only cross-builds Windows compiles ONE side of one

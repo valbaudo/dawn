@@ -393,6 +393,14 @@ func controlledGitEnv() []string {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_ATTR_NOSYSTEM=1",
+		// A declared path is a PATH, never a pattern. `--` ends revisions but does
+		// not stop git parsing what follows as a pathspec, so `expect: [dist/*]`
+		// matched `dist/out.txt`, staged it, and the capture SUCCEEDED while the
+		// tree contained no `dist/*` — the iff broken in the silent direction. Same
+		// for `?`, character classes, and magic prefixes like `:(glob)`. Set here
+		// rather than as a flag on the two call sites, so a future command that
+		// takes a pathspec cannot reintroduce it by forgetting.
+		"GIT_LITERAL_PATHSPECS=1",
 		"GIT_CONFIG_COUNT=3",
 		"GIT_CONFIG_KEY_0=core.autocrlf",
 		"GIT_CONFIG_VALUE_0=false",

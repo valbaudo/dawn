@@ -1,11 +1,15 @@
-//go:build unix && !solaris && !aix
+//go:build (unix && !solaris && !aix) || illumos
 
-// Go's `unix` build tag includes solaris and aix, and NEITHER has syscall.Flock
-// — so `//go:build unix` alone did not mean "flock is available here", it meant
-// the plan package did not compile there at all. The two are named explicitly
-// rather than listing the platforms that do work, so a future GOOS that Go adds
-// to `unix` WITH flock is picked up automatically and one without it fails loudly
-// at build time instead of silently losing the lock.
+// The set where syscall.Flock EXISTS, which is not any one build tag.
+//
+// Go's `unix` tag includes solaris and aix, and neither has Flock — so
+// `//go:build unix` alone meant the plan package did not compile there at all.
+// But excluding `solaris` alone then over-corrected: Go sets the `solaris` tag
+// for GOOS=illumos too, and illumos DOES have Flock (syscall_illumos.go exists
+// precisely because it does). That silently handed illumos the no-op lock, and a
+// cross-BUILD check could never catch it — illumos compiled fine, just without
+// the guarantee. Probed: flock on illumos, linux, darwin, freebsd, netbsd,
+// openbsd, dragonfly; absent on solaris, aix, windows, plan9, js, wasip1.
 
 package plan
 

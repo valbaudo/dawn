@@ -652,6 +652,17 @@ func TestExpectIsSatisfiedExactlyWhenTheTreeHasThePath(t *testing.T) {
 				}
 			},
 		},
+		// A declared path is a PATH, never a pattern. Each of these matched a real
+		// file as a git pathspec and let the capture succeed while the tree held
+		// nothing by the declared name — the iff broken in the direction that says
+		// nothing.
+		{"glob star", "dist/*", func(t *testing.T, d string) { writeFile(t, d, "dist/out.txt", "x") }, false},
+		{"glob question", "dist/out.?xt", func(t *testing.T, d string) { writeFile(t, d, "dist/out.txt", "x") }, false},
+		{"character class", "dist/[o]ut.txt", func(t *testing.T, d string) { writeFile(t, d, "dist/out.txt", "x") }, false},
+		{"pathspec magic", ":(glob)dist/**", func(t *testing.T, d string) { writeFile(t, d, "dist/out.txt", "x") }, false},
+		{"literal star really is a file", "dist/*", func(t *testing.T, d string) {
+			writeFile(t, d, "dist/*", "a file actually named star")
+		}, true},
 		{"fifo", "out.pipe", func(t *testing.T, d string) {
 			// exec rather than syscall.Mkfifo, which does not exist on every GOOS
 			// and would break the cross-platform vet that exists to catch exactly
