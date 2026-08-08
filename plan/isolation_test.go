@@ -57,13 +57,12 @@ func TestStateDirIsNotCapturedIntoTheWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	trees, err := store.NewTrees(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	// dawn owns the exclusion now, and states it: the state dir is passed to the
+	// store rather than hidden behind an ignore file git happened to honour.
+	trees := store.NewTrees(store.NewMem(), filepath.Join(work, ".dawn"))
 	ctx := context.Background()
 
-	first, err := trees.Capture(ctx, work)
+	first, err := trees.Capture(ctx, work, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +72,7 @@ func TestStateDirIsNotCapturedIntoTheWorkspace(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	second, err := trees.Capture(ctx, work)
+	second, err := trees.Capture(ctx, work, "")
 	if err != nil {
 		t.Fatal(err)
 	}

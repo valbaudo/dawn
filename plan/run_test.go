@@ -441,8 +441,9 @@ func (diffEchoer) CapturesTree()  {}
 func (d diffEchoer) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
 	*d.n++
 	out := conform(in, fmt.Sprintf("attempt-%d", *d.n))
-	// What `claude.Workspace` does at the end of every turn.
-	out["diff"] = "diff --git a/NOTES.md b/NOTES.md\n+" + strings.ReplaceAll(in.Prompt, "\n", "\n+")
+	// A reserved field carrying text derived from the prompt — the shape the
+	// deleted `diff` had, and the reason a judge sees declared fields only.
+	out["workspace"] = "NOTES.md holds: " + strings.ReplaceAll(in.Prompt, "\n", " ")
 	return dawn.Result{
 		Output:   out,
 		Produced: map[string]dawn.Ref{"workspace": {Kind: dawn.KindWorkspace, URI: "tree-x"}},
@@ -952,7 +953,7 @@ func TestPreflightResolvesAllBackendsBeforeCapabilityValidation(t *testing.T) {
 }
 
 func TestPreflightRejectsReservedRefsFromNonTreeBackend(t *testing.T) {
-	for _, field := range []string{"workspace", "diff"} {
+	for _, field := range []string{"workspace"} {
 		t.Run(field, func(t *testing.T) {
 			var calls int
 			p := &Plan{Steps: map[string]Step{

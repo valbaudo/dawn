@@ -295,90 +295,74 @@ names remain reserved for future backends; the current binary emits none in
 its own scratch dir: materialize inputs → run → capture → discard. The supplied host tree
 is captured first; agents work only in the scratch copy.
 
-`expect:` is a postcondition, and two lines of git give both halves:
+**The store is dawn's own, and shells out to nothing.** A tree is a MANIFEST — one line
+per path, sorted, naming a mode and the blob holding the content — and the tree's ref is
+that manifest's own blob ref. So a tree is a blob that lists other blobs: one store, no
+second repository, no refs to pin, nothing for a `gc` to reclaim.
 
-```
-git add -A                  # everything; .gitignore honored
-git add -f -- <expect…>     # forced past .gitignore, and errors if never produced
-```
+This replaced a git-backed store, and the reason is the reason this section used to be
+three times longer. git is an enormous configurable program that reads the machine it
+runs on, so "the same bytes give the same ref" had to be defended by ENUMERATING what to
+neutralize — `core.autocrlf`, then `core.excludesFile`, then `core.attributesFile`, then
+`GIT_TEMPLATE_DIR`, then the object format, then the `core.fileMode` / `ignorecase` /
+`precomposeunicode` that `git init` bakes in from whatever filesystem the state directory
+happens to sit on. Four audit rounds found four more entries. **The list has no end,
+because the set of things git reads is not dawn's to enumerate.** Deleting the dependency
+deleted the class. Nothing outside the captured directory can move a ref, and there is no
+configuration surface to forget an entry in.
 
-Every git subprocess uses a controlled configuration environment. System and personal
-configuration — `core.autocrlf`, `core.excludesFile`, `core.attributesFile`, ambient
-`GIT_CONFIG_*` overrides, and the system config and attributes files — cannot alter the
-captured bytes. The workspace's own `.gitignore` remains in force.
+Three modes — file, exec, symlink — because the exec bit is the only permission that
+survives a round trip through every filesystem dawn runs on, and the rest is host noise
+that would put a umask into a content address. Anything the store cannot represent (a
+FIFO, a socket, a device) is skipped rather than half-captured.
 
-`core.attributesFile` is pinned by name rather than left to `GIT_ATTR_NOSYSTEM`, which
-covers only the SYSTEM attributes file. Git resolves the personal one from
-`$XDG_CONFIG_HOME/git/attributes` on a path of its own, so `GIT_CONFIG_GLOBAL=/dev/null`
-does not suppress it — neutering global config makes git fall back to that default path
-rather than to nothing. Measured, and not what it first looked like: `*.txt eol=crlf
-text` in a personal attributes file leaves the captured **ref identical** and changes
-what **materialize** writes back out. So the identity key was never at risk; what broke
-is quieter — one ref hands two machines different bytes, and *materialize-then-capture is
-the identity* stops holding, which means an agent edits a file dawn did not commit.
+Not git-compatible, deliberately. `dawn show REF` streams a tar; pipe it into git yourself
+if you want a commit, outside the path that decides identity.
 
-**An ambient `GIT_TEMPLATE_DIR` is the third channel, and the one that outlives its
-environment.** `git init` copies a template's `info/exclude` and `info/attributes` into
-the new repository, and `$GIT_DIR/info/exclude` is honored by every later `git add -A` —
-so a variable set once, before the store existed, silently changed which files every
-future capture contained. The store is created with `--template=` (empty); unsetting the
-variable is not enough, because git falls back to a system template directory.
+**`expect:` is a postcondition, and it is asked of the TREE.** A declared path is
+satisfied if and only if the committed manifest contains it. That biconditional has broken
+in both directions before and both are now tests: a FIFO used to stat fine, stage nothing,
+and let the capture SUCCEED with the declared path absent — a silent false pass, worse
+than an abort — while a path behind a symlinked directory used to abort the run instead of
+reaching the repair loop.
 
-Verified: with `dist/` ignored, plain `add -A` yields a tree where `dist/dawn`
-**does not exist** — the flagship artifact silently absent.
+**A declared path is a PATH, never a pattern.** `expect: [dist/*]` looks for a file named
+`dist/*`. When declarations reached a tool that reads patterns, `dist/*` matched
+`dist/out.txt`, the capture succeeded, and the tree held nothing by the declared name;
+`:!nope` made `expect:` vacuously true for any non-empty workspace. The same rule governs
+the ignore file, for the same reason.
 
-**A capture is taken against the input tree as its baseline, so the filter applies only
-to files that APPEARED during the step.** Without that, `.gitignore` is re-applied from
-scratch at every hop and an artifact survives exactly one: `build` declares `dist/dawn`
-and forces it in, `smoke` receives the tree and has no reason to re-declare another
-step's artifact, and `smoke`'s output tree silently loses it. Measured before the
-baseline existed: capture → materialize → capture returned a *different* ref with the
-binary gone. So **materialize-then-capture is the identity** — a tree that changed sha by
-being written to disk and read back would not be content-addressed at all. What the
-agent newly creates under an ignored path (a `node_modules`, a build cache) is still
-untracked, still ignored, still out; and a file the agent deletes stays deleted, because
-a baseline is a starting point, not a floor.
+**Ignoring is `.dawnignore`, and it is literal.** One path per line at the root of the
+captured directory; `#` comments and blank lines skipped. A line names a file or a
+directory prefix — `node_modules`, `dist/cache` — with no globs, no patterns, no negation.
+A `*` is a file called `*`.
 
-**A missed `expect:` path is a rejection, not a crash.** Under a gate it feeds repair
-with "you did not produce X" and consumes an attempt at **zero judge tokens**; ungated,
-it fails the step. Every other capture error stays mechanical.
+**Ignores apply only to paths that are NEW.** A capture is taken against the input tree as
+its baseline, and a path already in that baseline stays whatever the ignore file says, as
+does any path the step declared. Without that rule an artifact survives exactly one hop:
+`build` declares `dist/dawn` and keeps it, `smoke` receives the tree and has no reason to
+re-declare another step's artifact, and `smoke`'s output silently loses it. So
+**materialize-then-capture is the identity** — a tree whose ref changed by being written to
+disk and read back would not be content-addressed at all. What the agent newly creates
+under an ignored path is still out, and a file the agent deletes stays deleted, because a
+baseline is a starting point and not a floor.
 
-**Missed means "not in the tree", and the index is what is asked.** `expect:` is a claim
-about the artifact dawn commits, so it is settled by what git staged and never by
-`os.Lstat`, which answers a different question and gets it wrong in both directions. It
-says *present* for entries git will not store — a FIFO or a socket stats fine, stages
-nothing, and the capture used to **succeed with the declared path absent from the tree**,
-a false pass, which is worse than an abort. And it says nothing about paths that fail
-inside `git add`: one behind a symlinked directory (`dist -> build`) resolves happily and
-is refused as "beyond a symbolic link", as is one inside an embedded repo or one the
-agent left unreadable. All of those escaped as mechanical aborts on attempt 1. Declared
-paths are added one at a time so the error names the right one, and an empty directory is
-still missing because git has no empty directories to stage.
+**dawn never captures its own state directory.** With `--dir .dawn --in .` the state
+directory sits inside the tree being captured, and capturing it would make every run's
+tree depend on the last run's journal — the ref moves when nothing changed and every cache
+hit is lost. The exclusion is an absolute path handed to the store at construction, not a
+rule an author can forget to write.
 
-**`expect:` paths are normalized, not policed for tidiness.** `./dist/out`, `dist//out`
-and `dist/out/` all name `dist/out`, so they load and collapse to one identity key.
-Refused instead are the paths that are not the same question: absolute, volume-qualified,
-backslashed, control-charactered, and anything that still escapes the workspace after
-cleaning — `dist/../..` is only visibly an escape once it collapses.
+**A nested `.git` is just files.** It used to fail the capture, because git records a
+directory carrying its own `.git` as a *commit reference* living in the nested repository
+rather than in dawn's store — a tree that could not round-trip. dawn's store has no such
+concept: a vendored dependency or a clone an agent made is captured as the files it is.
 
-**An embedded git repository fails the capture.** A directory carrying its own `.git` — a
-vendored dependency, a clone the agent made — is recorded by git as a *commit reference*,
-not files, and that commit lives in the nested repo rather than dawn's store. Reproduced:
-a tree holding `160000 commit 5f9bf40b… vendor/lib` materialized as `[main.go]`, with
-`vendor/lib` not empty but **absent**, and no error anywhere. Refused rather than
-repaired, because git will not descend into an embedded repo and capturing its `HEAD`
-instead would silently substitute its last commit for its working state. A tree that
-cannot round-trip is not a workspace. Ignore the path, or remove the nested `.git`; a
-nested repo under an already-ignored path was never staged and is not affected.
-
-**Every captured tree is pinned behind a ref.** `git write-tree` writes objects that
-nothing points at, so a store with no refs is one where every committed workspace is
-unreachable garbage by git's own definition — `git gc --prune=now` inside `.dawn/trees`
-deleted the lot, reproduced as `fatal: failed to unpack tree object`. dawn never runs
-gc, but an artifact that survives only until someone runs a standard maintenance command
-in the state directory is not durable. A ref points straight at the tree; no wrapper
-commit, which would carry a timestamp into something whose identity must stay its
-content.
+**There is nothing to pin.** A tree is a blob, blobs are what the store keeps, and a store
+that keeps its blobs has no unreachable objects and no maintenance command that could
+delete committed state. The git-backed store needed a ref per capture because
+`git write-tree` wrote objects nothing pointed at, and `git gc --prune=now` inside the
+state directory deleted the lot.
 
 The host tree enters via `--in DIR`, never a key, so no machine-specific path lives in
 the file whose bytes are the plan's identity.
@@ -683,13 +667,13 @@ and a posture that dangerous should be a word an author typed.
    step reported a different step's missing `--in`, advice that does not help because
    supplying it then produces a third error. The question is whether THIS step depends on
    the root, transitively; if it does not, the truthful answer is that it has not run.
-5. **The store only grows.** Pinning is per capture, including gate attempts nobody
-   accepted, so `git gc` now reclaims nothing. That is the deliberate side of the trade —
-   unbounded growth is a disk problem with an obvious fix, silent deletion of committed
-   state is not — but it is only half an answer. The other half is a prune, and the pins
-   are what make one expressible: a ref no journal line names is collectable, which is
-   not a question you can even ask of a dangling object. Stance: wait for a real store to
-   get big, then `dawn prune` reads the journal, deletes unnamed refs and runs gc.
+5. **The store only grows.** Every blob a capture ever made is kept, including the trees
+   of gate attempts nobody accepted. That is the deliberate side of the trade — unbounded
+   growth is a disk problem with an obvious fix, silent deletion of committed state is
+   not. The other half is a prune, and the manifest shape is what makes one expressible:
+   a blob no manifest names and no journal line names is collectable. Stance: wait for a
+   real store to get big, then `dawn prune` walks the journal and the manifests it points
+   at, and deletes what neither reaches.
 
 ---
 

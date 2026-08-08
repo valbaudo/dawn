@@ -144,24 +144,21 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 	// Declared paths are forced into the tree AND asserted here — before the diff,
 	// before any judge. A step that did not produce what it promised fails without
 	// anyone paying to review it.
-	tree, err := w.Trees.CaptureFrom(ctx, dir, base, in.Expect...)
+	tree, err := w.Trees.Capture(ctx, dir, base, in.Expect...)
 	if err != nil {
 		return dawn.Result{}, err
 	}
-	diff, err := w.Trees.Diff(ctx, base, tree)
-	if err != nil {
-		return dawn.Result{}, err
-	}
-	// The model's own reply is parsed against the step's declared outputs, exactly
-	// as the text backend does. Only `diff` is added, and only because it is a
-	// RESERVED name a plan may reference without declaring. `base` and the raw
-	// tree stay internal: the tree is already the workspace ref below, and a
-	// backend field that is neither declarable nor reserved would fail validation.
+	// The reply is validated against the step's DECLARED outputs and nothing is
+	// added to it. There used to be a reserved `diff` here — dawn's own rendering
+	// of the whole tree delta, produced by `git diff`. It is gone with git, and it
+	// would have gone anyway: a panel no longer sees it (it is not a declared
+	// field), so its only remaining reader was a downstream prompt, and a rendering
+	// dawn invents is exactly the thing SPEC §4 says an author should declare
+	// instead. The tree is the artifact; a description of it is an output field.
 	output, err := typedOutput(env, in.Schema)
 	if err != nil {
 		return dawn.Result{}, err
 	}
-	output["diff"] = diff
 	return dawn.Result{
 		Output: output,
 		Tokens: dawn.Tokens{
@@ -171,7 +168,7 @@ func (w Workspace) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result,
 			CacheCreate: env.Usage.CacheCreationTokens,
 		},
 		Produced: map[string]dawn.Ref{
-			"workspace": {Kind: dawn.KindWorkspace, URI: tree, Media: "application/vnd.git-tree"},
+			"workspace": {Kind: dawn.KindWorkspace, URI: tree, Media: "application/vnd.dawn-tree"},
 		},
 	}, nil
 }

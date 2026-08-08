@@ -269,10 +269,7 @@ func TestTimeoutDefaults(t *testing.T) {
 // Both must honor the schema, and a tree-capturing run may add only the reserved
 // `diff` on top of it.
 func TestWorkspaceHonorsTheSchema(t *testing.T) {
-	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "cas"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	trees := store.NewTrees(store.NewMem())
 	work := t.TempDir()
 	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("before\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -283,7 +280,7 @@ echo '{"type":"result","is_error":false,"result":"done","structured_output":{"su
 
 	// Reaches the backend the way every real caller does: as a captured tree the
 	// backend materializes into its own scratch dir. There is no Dir field to set.
-	base, err := trees.Capture(context.Background(), work)
+	base, err := trees.Capture(context.Background(), work, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,9 +304,6 @@ echo '{"type":"result","is_error":false,"result":"done","structured_output":{"su
 		if _, bad := res.Output[leaked]; bad {
 			t.Fatalf("%q must stay internal: a backend key that is neither declarable nor reserved fails validation", leaked)
 		}
-	}
-	if _, ok := res.Output["diff"].(string); !ok {
-		t.Fatal("diff is reserved and must be present")
 	}
 	if ref, ok := res.Produced["workspace"]; !ok || ref.Kind != dawn.KindWorkspace {
 		t.Fatalf("the captured tree must arrive as a workspace ref, got %+v", res.Produced)

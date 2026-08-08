@@ -140,7 +140,6 @@ const RootStep = "in"
 // never declarable, so an author cannot shadow them.
 var reserved = map[string]string{
 	"workspace": "the captured tree",
-	"diff":      "the rendering of what changed",
 }
 
 // stepID constrains ids so a reference can never be ambiguous: no dot means

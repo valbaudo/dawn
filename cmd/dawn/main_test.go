@@ -309,7 +309,7 @@ func (b capturingBackend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.
 	if err := os.WriteFile(filepath.Join(dir, "artifact.txt"), []byte("built bytes\n"), 0o644); err != nil {
 		return dawn.Result{}, err
 	}
-	tree, err := b.trees.Capture(ctx, dir)
+	tree, err := b.trees.Capture(ctx, dir, "")
 	if err != nil {
 		return dawn.Result{}, err
 	}
@@ -325,10 +325,7 @@ func (b capturingBackend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.
 
 func TestShowRefStreamsTar(t *testing.T) {
 	ctx := context.Background()
-	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "trees"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	trees := store.NewTrees(store.NewMem())
 	workspace := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(workspace, "bin"), 0o755); err != nil {
 		t.Fatal(err)
@@ -336,7 +333,7 @@ func TestShowRefStreamsTar(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace, "bin", "dawn"), []byte("executable bytes\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	tree, err := trees.Capture(ctx, workspace)
+	tree, err := trees.Capture(ctx, workspace, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,10 +375,7 @@ func TestShowRefStreamsTar(t *testing.T) {
 }
 
 func TestShowRefWritesScalarToInjectedWriter(t *testing.T) {
-	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "trees"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	trees := store.NewTrees(store.NewMem())
 	p := &plan.Plan{Steps: map[string]plan.Step{
 		"draft": {Agent: "fake/model", Prompt: "write"},
 	}}
@@ -403,10 +397,7 @@ type errorWriter struct{ err error }
 func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }
 
 func TestShowRefReturnsScalarWriterError(t *testing.T) {
-	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "trees"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	trees := store.NewTrees(store.NewMem())
 	p := &plan.Plan{Steps: map[string]plan.Step{
 		"draft": {Agent: "fake/model", Prompt: "write"},
 	}}
@@ -415,7 +406,7 @@ func TestShowRefReturnsScalarWriterError(t *testing.T) {
 	}})
 	sentinel := errors.New("writer failed")
 
-	err = showRef(context.Background(), r, p, trees, "draft.text", errorWriter{sentinel})
+	err := showRef(context.Background(), r, p, trees, "draft.text", errorWriter{sentinel})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("showRef error = %v, want sentinel writer error", err)
 	}

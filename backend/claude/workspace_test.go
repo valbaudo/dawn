@@ -12,15 +12,12 @@ import (
 )
 
 func TestWorkspaceStablePrefixFlag(t *testing.T) {
-	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "cas"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	trees := store.NewTrees(store.NewMem())
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("before\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	base, err := trees.Capture(context.Background(), src)
+	base, err := trees.Capture(context.Background(), src, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,10 +81,7 @@ func TestWorkspaceInputRefusesAmbiguity(t *testing.T) {
 // so a later step or `dawn show B.workspace | tar -x` produced a workspace with
 // no binary in it and nothing anywhere saying why.
 func TestWorkspaceKeepsAnUpstreamArtifactItDidNotDeclare(t *testing.T) {
-	trees, err := store.NewTrees(filepath.Join(t.TempDir(), "cas"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	trees := store.NewTrees(store.NewMem())
 	ctx := context.Background()
 
 	src := t.TempDir()
@@ -104,8 +98,8 @@ func TestWorkspaceKeepsAnUpstreamArtifactItDidNotDeclare(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// step A: declares the artifact, forcing it past .gitignore
-	stepA, err := trees.Capture(ctx, src, "dist/app")
+	// step A: declares the artifact, keeping it past the ignore file
+	stepA, err := trees.Capture(ctx, src, "", "dist/app")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,13 +132,13 @@ echo '{"type":"result","is_error":false,"result":"done","structured_output":{"su
 	if err != nil || string(got) != "package main // fixed\n" {
 		t.Fatalf("step B's edit must be captured, got %q (%v)", got, err)
 	}
-	// The diff is against the INPUT tree, so it shows the edit and not the
-	// artifact appearing out of nowhere.
-	diff, _ := res.Output["diff"].(string)
-	if !strings.Contains(diff, "main.go") {
-		t.Fatalf("diff should show the edit: %s", diff)
+	// The step's output is its DECLARED fields and nothing else. There is no
+	// reserved `diff` any more: a rendering dawn invents was shown to no one once
+	// judges moved to declared fields, and inventing it required git.
+	if _, ok := res.Output["diff"]; ok {
+		t.Fatal("diff was removed with git; a rendering is an output field the author declares")
 	}
-	if strings.Contains(diff, "dist/app") {
-		t.Fatalf("an untouched carried-through artifact must not appear in the diff: %s", diff)
+	if got, _ := res.Output["summary"].(string); got != "fixed it" {
+		t.Fatalf("declared output = %q, want the model's answer", got)
 	}
 }

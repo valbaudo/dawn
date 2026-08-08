@@ -266,11 +266,15 @@ func TestValidateOutput(t *testing.T) {
 	}
 }
 
-// A backend's auto-produced names are not "undeclared" — they are not model output.
+// A backend's auto-produced names are not "undeclared" — they are not model
+// output. `workspace` is the only one left; `diff` went with git.
 func TestValidateIgnoresReserved(t *testing.T) {
 	s := Step{Outputs: map[string]Type{"text": {}}}
-	if err := s.Validate(map[string]any{"text": "hi", "diff": "--- a\n+++ b"}); err != nil {
+	if err := s.Validate(map[string]any{"text": "hi", "workspace": "tree-abc"}); err != nil {
 		t.Fatalf("reserved backend fields must not trip validation: %v", err)
+	}
+	if err := s.Validate(map[string]any{"text": "hi", "diff": "no longer reserved"}); err == nil {
+		t.Fatal("diff is not reserved any more and must fail as an undeclared field")
 	}
 }
 

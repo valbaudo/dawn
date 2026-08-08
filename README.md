@@ -15,7 +15,7 @@ and everything else is plain code whose dependency arrows all point at `dawn`.
 |------|------|------------|
 | `dawn.go` | core types + the `Backend` seam | nothing |
 | `proc/` | child processes; on Unix their whole group dies on cancel, with a bounded pipe-wait fallback everywhere | nothing |
-| `store/` | content-addressed state: `Blobs` for bytes (`Mem`, durable `FS`), `Trees` for directories (git-backed) | `proc` |
+| `store/` | content-addressed state: `Blobs` for bytes (`Mem`, durable `FS`), `Trees` for directories (manifests over `Blobs`) | nothing |
 | `gate/` | judge / jury / k-of-N quorum / repair loop — a library, not an engine | `dawn` |
 | `backend/claude/` | `Backend` over `claude -p`; `Workspace` edits a repo, captures + materializes a tree | `dawn`, `store` |
 | `plan/` | strict static-DAG runner: typed output, no control flow, identity-keyed reuse | `dawn`, `store`, `gate`, `yaml.v3` |
@@ -86,9 +86,9 @@ field required, always, so there are no optional fields and **a reference that
 loads can never resolve to a missing value**. A reference to a field the upstream
 does not declare fails when the plan loads, before a token is spent.
 
-Inputs resolve by FIELD NAME, not by inspecting a value's kind: `workspace` and
-`diff` are the reserved names a tree-capturing step produces, and every other
-name is a declared output field, which is always a string. A workspace reference
+Inputs resolve by FIELD NAME, not by inspecting a value's kind: `workspace` is
+the reserved name a tree-capturing step produces, and every other name is a
+declared output field, which is always a string. A workspace reference
 travels into the next invocation as a ref and is materialized by the workspace
 backend; a scalar is rendered into the prompt. Both are committed, so a later run
 can still hand a workspace to the next step.
@@ -120,17 +120,26 @@ content-addressed `workspace` ref; a later invocation materializes that ref into
 a fresh dir and builds on it — so `repo@v1 → agent → repo@v2 → agent → repo@v3`
 flows with no shared mutable directory. `examples/repo.yaml` demonstrates it.
 
-A tree ref is a git tree sha, so identity really is the content: the same bytes
-captured on another day, by another user, on another machine give the same ref.
-Symlinks round-trip, the exec bit is normalized, identical blobs are stored once
-across versions, `.gitignore` is honored, and **any two captured refs diff
-directly** — not just consecutive ones. System and personal git configuration
-cannot change capture semantics: dawn disables ambient attributes, line-ending
-conversion, and global excludes while preserving the workspace's `.gitignore`.
-The working directory needs no `.git`; the store is the only repository involved.
-An `expect:` path (a file or non-empty directory) is force-added to this workspace
-tree (even when ignored) and must exist; empty directories are rejected because Git
-cannot capture them. Expected paths are not emitted as separate artifact refs.
+A tree is a MANIFEST — one line per path, sorted, naming a mode and the blob that
+holds the content — and a tree's ref is that manifest's own blob ref. So identity
+really is the content: the same bytes captured on another day, by another user, on
+another machine give the same ref. Symlinks round-trip, the exec bit is preserved
+and every other permission bit is normalized away, and identical blobs are stored
+once across versions.
+
+**Nothing outside the captured directory can move a ref**, because dawn shells out
+to nothing to compute one. The store used to be git-backed, and keeping that promise
+meant listing what to neutralize: `core.autocrlf`, then `core.excludesFile`, then
+`core.attributesFile`, then `GIT_TEMPLATE_DIR`, then the object format, then the
+settings `git init` bakes in from whichever filesystem the state directory sits on.
+Four audit rounds found four more entries. The list has no end, because the set of
+things git reads is not dawn's to enumerate — so the dependency went, and the class
+of bug went with it. `tar` and `sha256` from the standard library are the whole
+implementation.
+
+Ignoring is `.dawnignore`: one literal path or directory prefix per line, no globs,
+no patterns. A `*` is a file called `*`. Rules apply only to paths that are NEW, so
+an artifact an earlier step declared survives every later hop.
 
 ## What it refuses to do
 

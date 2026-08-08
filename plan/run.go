@@ -431,7 +431,7 @@ func (r *Runner) preflight(p *Plan, requireRoot bool) (err error) {
 				return fmt.Errorf("step %q input %q references %s.workspace but no --in was given",
 					id, name, RootStep)
 			}
-			if field != "workspace" && field != "diff" {
+			if field != "workspace" {
 				continue
 			}
 			if did != RootStep {

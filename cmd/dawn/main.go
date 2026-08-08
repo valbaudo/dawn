@@ -148,10 +148,9 @@ func execute(ctx context.Context, cmd string, args []string) error {
 	if err != nil {
 		return err
 	}
-	trees, err := store.NewTrees(filepath.Join(*dir, "trees"))
-	if err != nil {
-		return err
-	}
+	// One store. A tree is a manifest blob listing other blobs, so there is no
+	// second repository beside the blobs, nothing to pin, and nothing to gc.
+	trees := store.NewTrees(blobs, *dir)
 	journal, err := plan.OpenJournal(*dir)
 	if err != nil {
 		return err
@@ -159,7 +158,7 @@ func execute(ctx context.Context, cmd string, args []string) error {
 
 	r := &plan.Runner{Blobs: blobs, Journal: journal, Redo: redoNames, Jobs: *jobs, Backend: backendFactory(trees)}
 	if *in != "" {
-		tree, err := trees.Capture(ctx, *in)
+		tree, err := trees.Capture(ctx, *in, "")
 		if err != nil {
 			return fmt.Errorf("--in %s: %w", *in, err)
 		}
