@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,9 +42,12 @@ func TestRefInputsTravelAsRefs(t *testing.T) {
 	var seen []dawn.Invocation
 	p := &Plan{Steps: map[string]Step{
 		"first":  {Agent: "x/gen", Prompt: "make it", Outputs: map[string]Type{"text": {}, "note": {}}},
-		"second": {Agent: "x/gen", Prompt: "use it", Inputs: map[string]string{"repo": "first.workspace", "note": "first.note"}},
+		"second": {Agent: "x/edit", Prompt: "use it", Inputs: map[string]string{"repo": "first.workspace", "note": "first.note"}},
 	}}
-	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{"gen": workspaceConsumer{producer{seen: &seen}}})}
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"gen":  producer{seen: &seen},
+		"edit": workspaceConsumer{producer{seen: &seen}},
+	})}
 	if _, err := r.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
@@ -107,12 +111,18 @@ type fixedGenerator struct {
 	produced map[string]dawn.Ref
 }
 
-func (g fixedGenerator) Name() string           { return "fixed-generator" }
-func (g fixedGenerator) CapturesTree()          {}
-func (g fixedGenerator) MaterializesWorkspace() {}
+func (g fixedGenerator) Name() string  { return "fixed-generator" }
+func (g fixedGenerator) CapturesTree() {}
 func (g fixedGenerator) Invoke(context.Context, dawn.Invocation) (dawn.Result, error) {
 	return dawn.Result{Output: g.output, Produced: g.produced}, nil
 }
+
+// fixedEditor is the same fake in the EDITING posture: it consumes a workspace as
+// well as producing one, which preflight now requires them to be paired with a
+// workspace input.
+type fixedEditor struct{ fixedGenerator }
+
+func (fixedEditor) MaterializesWorkspace() {}
 
 type recordingJudge struct {
 	mu          sync.Mutex
@@ -157,7 +167,7 @@ func TestJudgeReceivesCompleteGeneratorEvidence(t *testing.T) {
 			output:   map[string]any{"text": "draft body"},
 			produced: map[string]dawn.Ref{"workspace": {Kind: dawn.KindWorkspace, URI: secretURI}},
 		},
-		"second": fixedGenerator{output: map[string]any{"summary": "ok", "alpha": "first"}},
+		"second": fixedEditor{fixedGenerator{output: map[string]any{"summary": "ok", "alpha": "first"}}},
 		"judge":  judge,
 	})}
 	if _, err := r.Run(context.Background(), judgeEvidencePlan()); err != nil {
@@ -190,7 +200,7 @@ func TestJudgeEvidenceIsStable(t *testing.T) {
 			"first": fixedGenerator{output: map[string]any{"text": "draft body"}, produced: map[string]dawn.Ref{
 				"workspace": {Kind: dawn.KindWorkspace, URI: "workspace://must-not-leak"},
 			}},
-			"second": fixedGenerator{output: output},
+			"second": fixedEditor{fixedGenerator{output: output}},
 			"judge":  judge,
 		})}
 		if _, err := r.Run(context.Background(), judgeEvidencePlan()); err != nil {
@@ -359,6 +369,123 @@ func TestCommittedReadsABranchThatNeverTouchedTheRoot(t *testing.T) {
 		t.Fatal("a step that needs the root must not silently read as absent")
 	} else if !strings.Contains(err.Error(), "--in") {
 		t.Fatalf("error should name the missing flag, got: %v", err)
+	}
+}
+
+// The converse of "expect: needs a tree capturer": a tree EDITOR needs a tree.
+// A claude-ws step with no workspace input cannot run, which the plan text says
+// on its own — so it must not price at exit 0 and then die after its upstream
+// has been paid for.
+func TestAWorkspaceEditorNeedsAWorkspaceInput(t *testing.T) {
+	yaml := head +
+		"  brief:\n    agent: x/text\n    prompt: brief\n" +
+		"  build:\n    agent: x/edit\n    prompt: build\n    inputs: {b: brief.text}\n"
+	p, err := loadPlan(t, yaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"text": echo{calls: &calls}, "edit": treeAgent{},
+	})}
+	_, err = r.Run(context.Background(), p)
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("error = %T %v, want ValidationError before anything runs", err, err)
+	}
+	if !strings.Contains(err.Error(), "no workspace input") {
+		t.Fatalf("error should say what is missing, got: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("a statically impossible plan paid for %d invocations", calls)
+	}
+	// And `show` refuses it too, so it never prices a plan `run` cannot execute.
+	if _, err := r.Status(p); !errors.As(err, &validation) {
+		t.Fatalf("show must refuse what run refuses, got %T %v", err, err)
+	}
+}
+
+// ...and the flag is only ever blamed on the step that actually needs it. Asking
+// "is Root nil?" instead of "does THIS step need one?" made an unrelated read
+// report another step's missing --in — advice that does not help, because
+// supplying the flag then produces a different error.
+func TestAnUnrunStepIsNotBlamedOnAnotherStepsMissingRoot(t *testing.T) {
+	yaml := head +
+		"  edit:\n    agent: x/tree\n    prompt: edit\n    inputs: {repo: in.workspace}\n" +
+		"  note:\n    agent: x/text\n    prompt: note\n"
+	p, err := loadPlan(t, yaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Nothing has ever run, so `note` is simply not committed yet.
+	r := durable(t, t.TempDir(), byModel(map[string]dawn.Backend{
+		"tree": treeAgent{}, "text": echo{calls: new(int)},
+	}))
+	rec, ok, err := r.Committed(p, "note")
+	if err != nil {
+		t.Fatalf("an unrun independent step must report itself unrun, not blame --in: %v", err)
+	}
+	if ok || rec.Ref != "" {
+		t.Fatal("nothing has run; note cannot be committed")
+	}
+}
+
+// diffEchoer models the ordinary editing agent: it writes what it was told into
+// a file, so dawn's own whole-tree `diff` — a RESERVED field dawn computes, not
+// the model — comes back carrying the text. If the prompt held the panel's
+// critique, the diff now holds it too.
+type diffEchoer struct{ n *int }
+
+func (d diffEchoer) Name() string { return "diff-echoer" }
+func (diffEchoer) CapturesTree()  {}
+func (d diffEchoer) Invoke(_ context.Context, in dawn.Invocation) (dawn.Result, error) {
+	*d.n++
+	out := conform(in, fmt.Sprintf("attempt-%d", *d.n))
+	// What `claude.Workspace` does at the end of every turn.
+	out["diff"] = "diff --git a/NOTES.md b/NOTES.md\n+" + strings.ReplaceAll(in.Prompt, "\n", "\n+")
+	return dawn.Result{
+		Output:   out,
+		Produced: map[string]dawn.Ref{"workspace": {Kind: dawn.KindWorkspace, URI: "tree-x"}},
+	}, nil
+}
+
+// THE PROPERTY, stated over channels rather than over one argument: whatever a
+// judge is shown, it must not contain the panel's own verdicts. The previous fix
+// cleaned judgeEvidence's prompt argument and passed the output map through
+// whole, which left `diff` as an unguarded second route for exactly the same
+// bytes.
+func TestNoJudgeSeesAVerdictByAnyChannel(t *testing.T) {
+	var mu sync.Mutex
+	var candidates []string
+	var n int
+	j := func(name string) dawn.Backend {
+		return listener{
+			voter: voter{name: name, seen: new(atomic.Int64)}, // never approves: 3 full rounds
+			mu:    &mu, seen: &candidates,
+		}
+	}
+	r := &Runner{Blobs: store.NewMem(), Backend: byModel(map[string]dawn.Backend{
+		"gen": diffEchoer{n: &n},
+		"a":   j("a"), "b": j("b"), "c": j("c"),
+	})}
+	_, err := r.Run(context.Background(), gated(&Gate{
+		Judges: []string{"x/a", "x/b", "x/c"}, Criteria: "be good",
+	}))
+	if err == nil {
+		t.Fatal("the panel never approves; the step must fail")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(candidates) < 6 {
+		t.Fatalf("expected 3 rounds x 3 judges, got %d candidates", len(candidates))
+	}
+	for i, c := range candidates {
+		for _, forbidden := range []string{rejectionHeadingForTest, "because a", "because b", "because c"} {
+			if strings.Contains(c, forbidden) {
+				t.Fatalf("candidate %d carried a panel verdict (%q) to a judge:\n%s", i, forbidden, c)
+			}
+		}
 	}
 }
 

@@ -72,23 +72,41 @@ func ValidateWorkspacePath(p string) error {
 // The escape test runs AFTER cleaning, which is what makes it real: `dist/../..`
 // is only visibly an escape once it collapses to `..`.
 func NormalizeWorkspacePath(p string) (string, error) {
-	switch {
-	case p == "":
-		return "", fmt.Errorf("path is empty")
-	case strings.ContainsRune(p, '\\'):
-		return "", fmt.Errorf("path %q must use forward slashes", p)
-	case path.IsAbs(p):
-		return "", fmt.Errorf("path %q must be relative", p)
-	case hasVolumePrefix(p):
-		return "", fmt.Errorf("path %q must not be volume-qualified", p)
-	case strings.IndexFunc(p, unicode.IsControl) >= 0:
-		return "", fmt.Errorf("path %q contains control characters", p)
+	if err := unsafeWorkspacePath(p, p); err != nil {
+		return "", err
 	}
 	clean := path.Clean(p)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", fmt.Errorf("path %q must stay within the workspace", p)
+	// EVERY guard again, on the cleaned result. path.Clean does not only delete
+	// components, it can promote one to the front: `x/../C:/y` cleans to `C:/y`,
+	// which is volume-qualified though the input was not. Checking the input alone
+	// let normalization hand back a path its own validator would refuse — the
+	// guards have to hold for the string that is actually used, not merely the one
+	// that was typed.
+	if err := unsafeWorkspacePath(clean, p); err != nil {
+		return "", err
 	}
 	return clean, nil
+}
+
+// unsafeWorkspacePath reports why check cannot name a location inside a
+// workspace. reported is the spelling to blame in the message, so a complaint
+// about a cleaned path still quotes what the author wrote.
+func unsafeWorkspacePath(check, reported string) error {
+	switch {
+	case check == "":
+		return fmt.Errorf("path is empty")
+	case strings.ContainsRune(check, '\\'):
+		return fmt.Errorf("path %q must use forward slashes", reported)
+	case path.IsAbs(check):
+		return fmt.Errorf("path %q must be relative", reported)
+	case hasVolumePrefix(check):
+		return fmt.Errorf("path %q must not be volume-qualified", reported)
+	case strings.IndexFunc(check, unicode.IsControl) >= 0:
+		return fmt.Errorf("path %q contains control characters", reported)
+	case check == "." || check == ".." || strings.HasPrefix(check, "../"):
+		return fmt.Errorf("path %q must stay within the workspace", reported)
+	}
+	return nil
 }
 
 func hasVolumePrefix(p string) bool {
@@ -105,7 +123,15 @@ func NewTrees(dir string) (*Trees, error) {
 		if err := os.MkdirAll(abs, 0o755); err != nil {
 			return nil, fmt.Errorf("store: mkdir %s: %w", abs, err)
 		}
-		if out, err := git(context.Background(), "", controlledGitEnv(), "init", "--bare", "-q", abs); err != nil {
+		// --template= (EMPTY) because a template is a third channel into the store,
+		// independent of config and attributes files. `git init` copies the
+		// template's info/exclude and info/attributes into the new repository, and
+		// $GIT_DIR/info/exclude is honored by every later `git add -A` — so an
+		// ambient GIT_TEMPLATE_DIR silently changed which files a capture contained,
+		// permanently, from a variable set once before the store was created.
+		// Passing it empty is the only way to opt out; unsetting the variable is not
+		// enough, since git falls back to a system template directory.
+		if out, err := git(context.Background(), "", controlledGitEnv(), "init", "--bare", "-q", "--template=", abs); err != nil {
 			return nil, fmt.Errorf("store: init tree store: %w: %s", err, out)
 		}
 	}
@@ -165,45 +191,34 @@ func (t *Trees) CaptureFrom(ctx context.Context, workDir, base string, must ...s
 	if out, err := git(ctx, workDir, env, "add", "-A"); err != nil {
 		return "", fmt.Errorf("store: capture %s: %w: %s", workDir, err, out)
 	}
-	if len(must) > 0 {
-		for _, path := range must {
-			declaredPath := filepath.Join(workDir, filepath.FromSlash(path))
-			info, err := os.Lstat(declaredPath)
-			if err != nil {
-				// ANY stat failure is a missing path, not just ENOENT. The question
-				// `expect:` asks is "did the agent put a usable entry here", and the
-				// answer is no whether the path is absent (ENOENT), whether a parent
-				// component came back a plain file (ENOTDIR — the agent wrote `dist`
-				// instead of `dist/`), or whether it is a symlink cycle (ELOOP). Those
-				// are the same authoring mistake with different errno, and os.IsNotExist
-				// is true only for the first, so splitting them sent the commonest case
-				// down the mechanical path: the gate aborted on attempt 1 with no
-				// feedback instead of telling the agent which path it owes.
-				return "", &MissingPathError{Path: path}
-			}
-			if info.IsDir() {
-				nonEmpty := false
-				err := filepath.WalkDir(declaredPath, func(current string, entry os.DirEntry, err error) error {
-					if err != nil {
-						return err
-					}
-					if current != declaredPath && !entry.IsDir() {
-						nonEmpty = true
-						return filepath.SkipAll
-					}
-					return nil
-				})
-				if err != nil {
-					return "", fmt.Errorf("store: inspect declared path %q: %w", path, err)
-				}
-				if !nonEmpty {
-					return "", &MissingPathError{Path: path}
-				}
-			}
+	// `expect:` is a claim about the TREE, so it is asked of the index — the thing
+	// that becomes the tree — and never of the filesystem.
+	//
+	// os.Lstat answers a different question and gets it wrong in both directions.
+	// It says present for entries git will not store: a FIFO or a socket stats
+	// fine, stages nothing, and the capture used to succeed with the declared path
+	// silently absent from the tree — a false pass, which is worse than an abort.
+	// And it says nothing about the paths that fail inside `git add`: one behind a
+	// symlinked directory (`dist -> build`) resolves happily for Lstat and is
+	// refused by git as "beyond a symbolic link", as is one inside an embedded
+	// repo, or one the agent left unreadable. Those all used to escape as
+	// mechanical errors, aborting the gate on attempt 1 with no feedback.
+	//
+	// Per path rather than one pathspec list, so the error names the path that is
+	// actually missing. That is one extra git call per declared path against a
+	// 30m invocation bound.
+	for _, path := range must {
+		if _, err := git(ctx, workDir, env, "add", "-f", "--", path); err != nil {
+			return "", &MissingPathError{Path: path}
 		}
-		args := append([]string{"add", "-f", "--"}, must...)
-		if out, err := git(ctx, workDir, env, args...); err != nil {
-			return "", fmt.Errorf("store: force declared paths in %s: %w: %s", workDir, err, strings.TrimSpace(out))
+		// add can succeed and stage nothing — an empty directory is the honest
+		// case, a FIFO the dishonest one. Only the index settles it.
+		staged, err := git(ctx, workDir, env, "ls-files", "-s", "--", path)
+		if err != nil {
+			return "", fmt.Errorf("store: inspect declared path %q in %s: %w", path, workDir, err)
+		}
+		if strings.TrimSpace(staged) == "" {
+			return "", &MissingPathError{Path: path}
 		}
 	}
 	if err := t.refuseGitlinks(ctx, workDir, env); err != nil {
@@ -388,9 +403,14 @@ func controlledGitEnv() []string {
 		// personal one from $XDG_CONFIG_HOME/git/attributes (else ~/.config/git/attributes)
 		// on a path independent of the config files, so GIT_CONFIG_GLOBAL=/dev/null
 		// does not suppress it — neutering global config makes git fall back to that
-		// default path rather than to nothing. Measured: `*.txt eol=crlf text` in a
-		// personal attributes file moved a captured ref, which moves the identity key,
-		// which re-pays committed work on a second machine.
+		// default path rather than to nothing.
+		//
+		// What it actually breaks, measured rather than assumed: `*.txt eol=crlf text`
+		// in a personal attributes file leaves the captured REF unchanged and changes
+		// what MATERIALIZE writes back out — CRLF where the capture held LF. So this
+		// is not a key-stability bug, it is worse in a quieter way: the same ref hands
+		// two machines different bytes, and SPEC §4's "materialize-then-capture is the
+		// identity" stops holding. An agent then edits a file dawn did not commit.
 		"GIT_CONFIG_KEY_2=core.attributesFile",
 		"GIT_CONFIG_VALUE_2="+os.DevNull,
 	)

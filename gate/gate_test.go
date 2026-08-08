@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -228,6 +229,31 @@ func TestJudgeMalformedVerdictIsErrorNotRejection(t *testing.T) {
 				t.Fatal("a malformed verdict must never read as approval")
 			}
 		})
+	}
+}
+
+// Tolerating a missing `reason` on the way IN must not silence it on the way
+// OUT. A rejection is the only signal repair has, so a panel that refuses
+// without reasons has to produce a critique that says so — otherwise the next
+// attempt is told it was refused and nothing about what to change, and the loop
+// spends its whole budget regenerating against no information.
+func TestCritiqueNamesAJudgeThatRejectedWithoutAReason(t *testing.T) {
+	got := critique([]Verdict{
+		{Judge: "a", Approved: false},
+		{Judge: "b", Approved: false, Reason: "too vague"},
+		{Judge: "c", Approved: true},
+	})
+	if !strings.Contains(got, "- a:") {
+		t.Fatalf("a reasonless rejection must still appear:\n%s", got)
+	}
+	if !strings.Contains(got, "- b: too vague") {
+		t.Fatalf("a stated objection must survive:\n%s", got)
+	}
+	if strings.Contains(got, "- c:") {
+		t.Fatalf("an approval is not an objection:\n%s", got)
+	}
+	if strings.TrimSpace(strings.TrimPrefix(got, rejectionHeading)) == "" {
+		t.Fatal("critique is the heading alone, which tells the generator nothing")
 	}
 }
 

@@ -413,6 +413,15 @@ func (r *Runner) preflight(p *Plan, requireRoot bool) (err error) {
 				return fmt.Errorf("step %q declares expect: but agent %q captures no tree", id, s.Agent)
 			}
 		}
+		// The CONVERSE of the two checks below, and the one that was missing: a
+		// backend that materializes a workspace requires one, so a `claude-ws` step
+		// with no workspace input cannot run — statically, from the plan text, with
+		// no live agent needed to know it. Left unchecked it priced at exit 0 and
+		// then died at runtime, after every upstream had been paid for.
+		if _, ok := consumer.(dawn.WorkspaceMaterializer); ok && !hasWorkspaceInput(s) {
+			return fmt.Errorf("step %q: agent %q edits a workspace but the step declares no workspace input",
+				id, s.Agent)
+		}
 		for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
 			did, field, err := ParseRef(s.Inputs[name])
 			if err != nil {
@@ -441,6 +450,41 @@ func (r *Runner) preflight(p *Plan, requireRoot bool) (err error) {
 		}
 	}
 	return nil
+}
+
+// hasWorkspaceInput reports whether any input resolves to a `workspace` field —
+// the one input a tree-editing backend cannot run without.
+func hasWorkspaceInput(s Step) bool {
+	for _, ref := range s.Inputs {
+		if _, field, err := ParseRef(ref); err == nil && field == "workspace" {
+			return true
+		}
+	}
+	return false
+}
+
+// needsRoot reports whether id depends on the reserved `in` step, directly or
+// through any upstream. Used to decide whether a missing --in is this step's
+// problem, so a read of an unrelated branch is not told to supply a flag that
+// would not help it.
+func needsRoot(p *Plan, id string, seen map[string]bool) bool {
+	if seen[id] {
+		return false
+	}
+	seen[id] = true
+	for _, ref := range p.Steps[id].Inputs {
+		did, _, err := ParseRef(ref)
+		if err != nil {
+			continue
+		}
+		if did == RootStep {
+			return true
+		}
+		if _, ok := p.Steps[did]; ok && needsRoot(p, did, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 // backendFor constructs the backend named by a step's agent string.
@@ -538,7 +582,7 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.B
 		// silently-green dependence §2 forbids. A judge votes on the work, never on
 		// what the panel already said about it. Refs stay in Invocation.Inputs and
 		// must never leak into this textual evidence.
-		text, err := judgeEvidence(inv.Prompt, res.Output)
+		text, err := judgeEvidence(inv.Prompt, res.Output, feedback)
 		if err != nil {
 			return gate.Candidate{}, err
 		}
@@ -569,12 +613,58 @@ func (r *Runner) runGated(ctx context.Context, id string, s Step, backend dawn.B
 // judgeEvidence renders one complete, deterministic account of what the
 // generator was asked and the validated object it returned. MarshalIndent sorts
 // map keys, keeping repeated jury calls byte-identical.
-func judgeEvidence(prompt string, output map[string]any) (string, error) {
-	body, err := json.MarshalIndent(output, "", "  ")
+func judgeEvidence(prompt string, output map[string]any, feedback string) (string, error) {
+	body, err := json.MarshalIndent(redactVerdicts(output, feedback), "", "  ")
 	if err != nil {
 		return "", err
 	}
 	return "Generator request:\n" + prompt + "\n\nCaptured output:\n" + string(body), nil
+}
+
+const redacted = "[panel verdict redacted]"
+
+// redactVerdicts removes the panel's own critique from the evidence dawn is about
+// to hand the panel.
+//
+// Passing `inv.Prompt` instead of the attempt's cleans the FIRST of two routes.
+// The second is the output map, and specifically the reserved `diff`: dawn
+// computes that itself from the whole tree delta, so an agent that does the most
+// ordinary thing in the world — writing down what it was asked to fix — puts the
+// round-1 verdicts, judge names and all, into round 2's evidence. dawn built
+// those bytes and dawn delivers them, so dawn removes them.
+//
+// Scoped honestly. This strips the critique lines VERBATIM, because those are
+// strings dawn produced and can therefore recognize. A generator that paraphrases
+// an objection in its own words is not a channel dawn opened and is not something
+// string matching could close; the guarantee is "dawn never carries a verdict
+// back to the panel", not "no judge can ever infer that an earlier round existed".
+//
+// The committed result keeps the real diff — this rewrites a copy for the jury
+// only, because what the store records is state and what the panel reads is
+// evidence.
+func redactVerdicts(output map[string]any, feedback string) map[string]any {
+	var lines []string
+	for _, l := range strings.Split(feedback, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) == 0 {
+		return output
+	}
+	clean := make(map[string]any, len(output))
+	for k, v := range output {
+		s, ok := v.(string)
+		if !ok {
+			clean[k] = v
+			continue
+		}
+		for _, l := range lines {
+			s = strings.ReplaceAll(s, l, redacted)
+		}
+		clean[k] = s
+	}
+	return clean
 }
 
 // objections summarizes why a panel refused, for the step's error and its journal
@@ -722,12 +812,13 @@ func (r *Runner) Committed(p *Plan, id string) (StepResult, bool, error) {
 			continue
 		}
 		if st.State != "fresh" {
-			// Not fresh AND no root: say which flag is missing rather than "run it
-			// first", which would send the caller to `dawn run` only to be told the
-			// same thing one command later. Re-run with the requirement on, purely
-			// for the message — this is already the failure path, so it costs nothing
-			// on the path that works.
-			if r.Root == nil {
+			// Say which flag is missing rather than "run it first" — but ONLY when
+			// the flag is this step's problem. Asking merely "is Root nil?" blamed
+			// any plan that had a root-dependent branch anywhere, so reading an
+			// unrelated step reported a different step's missing --in, and supplying
+			// it produced a third error. The truthful answer for a step that does not
+			// depend on the root is that it has not been run.
+			if r.Root == nil && needsRoot(p, id, map[string]bool{}) {
 				if err := r.preflight(p, true); err != nil {
 					return StepResult{}, false, err
 				}

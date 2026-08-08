@@ -75,6 +75,17 @@ never declarable. The step id `in` is reserved and filled by `--in DIR`.
   fails silently green. The generator's prompt grows across repair rounds; the judge's
   evidence does not, apart from the candidate. Every judge receives identical bytes in
   a fresh context against an engine-fixed verdict schema.
+
+  **Both routes, not one.** Cleaning the prompt alone left the OUTPUT map carrying the
+  same bytes: `diff` is reserved and computed by dawn from the whole tree delta, so an
+  agent doing the most ordinary thing there is — writing down what it was asked to fix —
+  put round 1's verdicts into round 2's evidence. dawn strips its own critique from the
+  rendered evidence, verbatim, because those are strings dawn produced and can recognize.
+  The committed result keeps the real diff: what the store records is state, what the
+  panel reads is evidence. Scoped honestly — a generator that PARAPHRASES an objection is
+  not a channel dawn opened, and no string match could close it. The guarantee is that
+  dawn never carries a verdict back to the panel, not that no judge could ever infer that
+  an earlier round happened.
 - **Crash ≠ verdict.** A mechanical judge failure propagates; it never consumes an
   attempt and never reads as approval.
 - **Identity** = hash(step id, backend, model, prompt, resolved `outputs`, `expect`,
@@ -196,9 +207,18 @@ rejects empty or unknown `--redo` names.
 **Runner preflight**, after concrete backends are available and before any invocation or
 token spend: every generator and judge resolves; `expect:` and reserved
 `workspace`/`diff` producers capture trees; workspace consumers can materialize them;
-any referenced `in.workspace` has a root supplied by `--in`; and every `Runner.Redo`
-key names a real, non-empty step id. The CLI also validates `--redo` early, before
-constructing stores, while shared Runner preflight protects direct callers.
+**a workspace consumer HAS a workspace input**; any referenced `in.workspace` has a root
+supplied by `--in`; and every `Runner.Redo` key names a real, non-empty step id. The CLI
+also validates `--redo` early, before constructing stores, while shared Runner preflight
+protects direct callers.
+
+That fourth check is the converse of the third, and it was the one missing. `expect:`
+needs a tree capturer; a tree EDITOR needs a tree. The workspace input *is* the working
+directory, so a `claude-ws` step that declares none cannot run — decidable from the plan
+text alone, with no live agent required — yet it priced at exit 0 and then died at
+runtime, after every upstream had been paid for. Implementing `WorkspaceMaterializer` is
+therefore a **requirement**, not merely a capability, and that is what the interface now
+says.
 
 **Runtime**, after the agent returns and *before* the step commits: strict-parse, every
 declared field present, enum values members, **no undeclared fields**. Any failure
@@ -246,9 +266,18 @@ captured bytes. The workspace's own `.gitignore` remains in force.
 covers only the SYSTEM attributes file. Git resolves the personal one from
 `$XDG_CONFIG_HOME/git/attributes` on a path of its own, so `GIT_CONFIG_GLOBAL=/dev/null`
 does not suppress it — neutering global config makes git fall back to that default path
-rather than to nothing. Measured: `*.txt eol=crlf text` in a personal attributes file
-moved a captured ref, which moves the identity key, which re-pays committed work on a
-second machine.
+rather than to nothing. Measured, and not what it first looked like: `*.txt eol=crlf
+text` in a personal attributes file leaves the captured **ref identical** and changes
+what **materialize** writes back out. So the identity key was never at risk; what broke
+is quieter — one ref hands two machines different bytes, and *materialize-then-capture is
+the identity* stops holding, which means an agent edits a file dawn did not commit.
+
+**An ambient `GIT_TEMPLATE_DIR` is the third channel, and the one that outlives its
+environment.** `git init` copies a template's `info/exclude` and `info/attributes` into
+the new repository, and `$GIT_DIR/info/exclude` is honored by every later `git add -A` —
+so a variable set once, before the store existed, silently changed which files every
+future capture contained. The store is created with `--template=` (empty); unsetting the
+variable is not enough, because git falls back to a system template directory.
 
 Verified: with `dist/` ignored, plain `add -A` yields a tree where `dist/dawn`
 **does not exist** — the flagship artifact silently absent.
@@ -269,12 +298,17 @@ a baseline is a starting point, not a floor.
 with "you did not produce X" and consumes an attempt at **zero judge tokens**; ungated,
 it fails the step. Every other capture error stays mechanical.
 
-**Missed means unstattable, not merely absent.** ENOENT is the rare case. The common
-one is an agent that wrote a plain file where a directory belongs, so a declared
-`dist/out.txt` stats ENOTDIR, or that left a symlink cycle, which stats ELOOP. Those are
-one authoring mistake wearing three errno, and testing only `os.IsNotExist` sent the
-commonest of them down the mechanical path — the gate aborted on attempt 1 with no
-feedback instead of telling the agent which path it still owes.
+**Missed means "not in the tree", and the index is what is asked.** `expect:` is a claim
+about the artifact dawn commits, so it is settled by what git staged and never by
+`os.Lstat`, which answers a different question and gets it wrong in both directions. It
+says *present* for entries git will not store — a FIFO or a socket stats fine, stages
+nothing, and the capture used to **succeed with the declared path absent from the tree**,
+a false pass, which is worse than an abort. And it says nothing about paths that fail
+inside `git add`: one behind a symlinked directory (`dist -> build`) resolves happily and
+is refused as "beyond a symbolic link", as is one inside an embedded repo or one the
+agent left unreadable. All of those escaped as mechanical aborts on attempt 1. Declared
+paths are added one at a time so the error names the right one, and an empty directory is
+still missing because git has no empty directories to stage.
 
 **`expect:` paths are normalized, not policed for tidiness.** `./dist/out`, `dist//out`
 and `dist/out/` all name `dist/out`, so they load and collapse to one identity key.
@@ -488,8 +522,17 @@ operator stopped it* and *the machine broke* are different facts.
 runs against one `--dir` corrupt nothing — journal lines are atomic appends and blobs are
 content-addressed — but they can both miss the same key, execute it, and pay. The second
 Unix run is refused rather than queued, and the kernel releases the lock when its process
-dies. `dawn show` never locks. Non-Unix builds compile, but their lock implementation is
-a no-op: concurrent runs are unguarded and can duplicate work and cost.
+dies. `dawn show` never locks.
+
+**"Unix" here means "has `syscall.Flock`", which is not the same set as Go's `unix` build
+tag.** That tag includes **solaris** and **aix**, and neither provides `Flock` — so
+`//go:build unix` did not mean "the lock works here", it meant the `plan` package did not
+compile there at all, and a CI job that cross-built only Windows compiled one side of one
+split and reported the tags covered. The lock is built for `unix && !solaris && !aix`;
+everywhere else — solaris, aix, Windows, plan9, js — the implementation is a no-op, the
+binary still builds, and concurrent runs against one state directory are unguarded: both
+miss the same key, both execute it, both pay. CI cross-builds and vets every platform
+whose build-tagged file differs, which is the only way this stays true.
 
 ---
 
@@ -590,7 +633,11 @@ and a posture that dangerous should be a word an author typed.
    narrower thing: a step that does not depend on the root reads back with no `--in`,
    even in a plan whose other branches do. `Runner.Committed` therefore skips the root
    requirement that `Run` and `dawn show PLAN` enforce, and a step that genuinely needs
-   the root still names the missing flag rather than reporting itself absent.
+   the root still names the missing flag — but ONLY that step. Asking merely "is there a
+   root?" blamed any plan with a root-dependent branch anywhere, so reading an unrelated
+   step reported a different step's missing `--in`, advice that does not help because
+   supplying it then produces a third error. The question is whether THIS step depends on
+   the root, transitively; if it does not, the truthful answer is that it has not run.
 5. **The store only grows.** Pinning is per capture, including gate attempts nobody
    accepted, so `git gc` now reclaims nothing. That is the deliberate side of the trade —
    unbounded growth is a disk problem with an obvious fix, silent deletion of committed

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,31 @@ func TestMemRejectsMalformedAndMissingRefs(t *testing.T) {
 	}
 	if _, err := b.Get(Ref([]byte("never stored"))); err == nil || !strings.Contains(err.Error(), "ref not found") {
 		t.Fatalf("Get missing ref error = %v, want ref not found", err)
+	}
+}
+
+// THE PROPERTY that ties the two path functions together: whatever normalization
+// returns, validation must accept. Guards were applied to the input only, and
+// path.Clean can promote an interior component to the front — so a path that
+// entered clean could leave volume-qualified, and the pair disagreed.
+func TestNormalizeNeverReturnsWhatValidateRefuses(t *testing.T) {
+	for _, p := range []string{
+		"dist/out", "./dist/out", "dist//out", "dist/./out", "dist/sub/../out",
+		"x/../C:/y", "a/../../b", "a/..", "./.", "sub/../..", "dist/out/",
+		"C:/x", "/abs", "..", ".", "", "a\\b", "a/\x01b", "a/../c",
+	} {
+		t.Run(p, func(t *testing.T) {
+			clean, err := NormalizeWorkspacePath(p)
+			if err != nil {
+				return // refused outright is always a safe answer
+			}
+			if err := ValidateWorkspacePath(clean); err != nil {
+				t.Fatalf("NormalizeWorkspacePath(%q) = %q, which ValidateWorkspacePath refuses: %v", p, clean, err)
+			}
+			if clean != path.Clean(clean) {
+				t.Fatalf("NormalizeWorkspacePath(%q) = %q, which is not normalized", p, clean)
+			}
+		})
 	}
 }
 

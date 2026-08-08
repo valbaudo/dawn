@@ -19,11 +19,33 @@ jobs:
       - run: go test -race ./...
       - run: go vet ./...
 
-  windows-compile:
+  # Every platform whose build-tagged file differs, not just Windows. The lock
+  # split is `unix && !solaris && !aix` vs the rest, and process groups split
+  # again — so a job that only cross-builds Windows compiles ONE side of one
+  # split and calls the tags covered. solaris and aix shipped broken under
+  # exactly that gap.
+  cross-compile:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - {goos: windows, goarch: amd64} # no flock, no process groups
+          - {goos: solaris, goarch: amd64} # unix tag, no flock
+          - {goos: aix, goarch: ppc64} # unix tag, no flock
+          - {goos: illumos, goarch: amd64} # unix tag, flock present
+          - {goos: freebsd, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+          - {goos: plan9, goarch: amd64}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: GOOS=windows GOARCH=amd64 go build ./...
+      - run: go build ./...
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+      - run: go vet ./...
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}

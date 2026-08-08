@@ -337,10 +337,44 @@ func TestCaptureIgnoresPersonalAutocrlf(t *testing.T) {
 	}
 }
 
+// The third channel, and the one that outlives the environment that set it: an
+// ambient GIT_TEMPLATE_DIR is read by `git init`, which copies info/exclude into
+// the store, and every later `git add -A` honors it forever after.
+func TestCaptureIgnoresAnAmbientTemplateDir(t *testing.T) {
+	ctx := context.Background()
+	tmpl := t.TempDir()
+	writeFile(t, tmpl, "info/exclude", "*.log\n")
+	writeFile(t, tmpl, "info/attributes", "*.txt eol=crlf text\n")
+
+	capture := func() string {
+		t.Helper()
+		tr := trees(t) // NewTrees runs `git init` under whatever env is set now
+		d := t.TempDir()
+		writeFile(t, d, "a.txt", "line\n")
+		writeFile(t, d, "debug.log", "noise\n")
+		ref, err := tr.Capture(ctx, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ref
+	}
+
+	clean := capture()
+	t.Setenv("GIT_TEMPLATE_DIR", tmpl)
+	if hostile := capture(); hostile != clean {
+		t.Fatalf("an ambient GIT_TEMPLATE_DIR changed the capture: %s != %s", hostile, clean)
+	}
+}
+
 // The excludesFile sibling. git resolves the PERSONAL attributes file from
 // $XDG_CONFIG_HOME/git/attributes on a path of its own, so neither
-// GIT_CONFIG_GLOBAL=/dev/null nor GIT_ATTR_NOSYSTEM (system file only) suppresses
-// it — and an eol= attribute moves the captured ref, which moves the identity key.
+// GIT_CONFIG_GLOBAL=/dev/null nor GIT_ATTR_NOSYSTEM (system file only) suppresses it.
+//
+// Both halves are asserted because they fail differently. The REF is unchanged
+// either way — an eol= attribute is applied on checkout, not on capture — so the
+// identity key was never at risk; what moves is what MATERIALIZE writes, which
+// means one ref hands two machines different bytes and the round trip stops being
+// the identity SPEC §4 claims. The bytes assertion is the load-bearing one.
 func TestCaptureIgnoresPersonalAttributesFile(t *testing.T) {
 	tr, ctx := trees(t), context.Background()
 	clean, hostile := t.TempDir(), t.TempDir()
@@ -359,7 +393,7 @@ func TestCaptureIgnoresPersonalAttributesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if hostileRef != cleanRef {
-		t.Fatalf("personal core.attributesFile changed capture: %s != %s", hostileRef, cleanRef)
+		t.Fatalf("personal core.attributesFile changed the ref: %s != %s", hostileRef, cleanRef)
 	}
 	dst := t.TempDir()
 	if err := tr.Materialize(ctx, hostileRef, dst); err != nil {
@@ -575,6 +609,91 @@ func TestCaptureFailsOnAMissingDeclaredPath(t *testing.T) {
 	}
 	if missing.Path != "dist/never-built" {
 		t.Fatalf("Path = %q", missing.Path)
+	}
+}
+
+// THE PROPERTY, stated over the captured tree rather than over one syscall:
+// `expect: [p]` succeeds if and only if the tree dawn commits contains p.
+//
+// Asking os.Lstat instead was the source of two opposite bugs. It said "present"
+// for things git will not store (a FIFO, a path behind a symlinked directory)
+// and it said nothing at all about paths that fail later inside `git add`, which
+// then surfaced as a mechanical abort rather than a rejection the agent could
+// repair. Ask git what it staged; that is the thing whose answer is the tree.
+func TestExpectIsSatisfiedExactlyWhenTheTreeHasThePath(t *testing.T) {
+	for _, tc := range []struct {
+		name, declared string
+		build          func(t *testing.T, dir string)
+		wantInTree     bool
+	}{
+		{"plain file", "dist/out.txt", func(t *testing.T, d string) { writeFile(t, d, "dist/out.txt", "x") }, true},
+		{"non-empty directory", "dist", func(t *testing.T, d string) { writeFile(t, d, "dist/a", "x") }, true},
+		{"absent", "dist/out.txt", func(t *testing.T, d string) {}, false},
+		{"parent is a file", "dist/out.txt", func(t *testing.T, d string) { writeFile(t, d, "dist", "x") }, false},
+		{"empty directory", "dist", func(t *testing.T, d string) {
+			if err := os.MkdirAll(filepath.Join(d, "dist"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"symlink cycle", "loop/out.txt", func(t *testing.T, d string) {
+			if err := os.Symlink("loop", filepath.Join(d, "loop")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		}, false},
+		{
+			// git refuses a pathspec "beyond a symbolic link", so the tree holds
+			// `dist` as a link and `build/app` as a file — and NOT `dist/app`.
+			// Lstat happily resolved it and said yes.
+			name: "behind a symlinked directory", declared: "dist/app",
+			build: func(t *testing.T, d string) {
+				writeFile(t, d, "build/app", "binary")
+				if err := os.Symlink("build", filepath.Join(d, "dist")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+		{"fifo", "out.pipe", func(t *testing.T, d string) {
+			// exec rather than syscall.Mkfifo, which does not exist on every GOOS
+			// and would break the cross-platform vet that exists to catch exactly
+			// that class of thing.
+			bin, err := exec.LookPath("mkfifo")
+			if err != nil {
+				t.Skipf("mkfifo unavailable: %v", err)
+			}
+			if out, err := exec.Command(bin, filepath.Join(d, "out.pipe")).CombinedOutput(); err != nil {
+				t.Skipf("mkfifo failed: %v: %s", err, out)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr, ctx := trees(t), context.Background()
+			d := t.TempDir()
+			writeFile(t, d, "main.go", "package main\n")
+			tc.build(t, d)
+
+			ref, err := tr.Capture(ctx, d, tc.declared)
+			if !tc.wantInTree {
+				var missing *MissingPathError
+				if !errors.As(err, &missing) {
+					t.Fatalf("error = %T %v, want *MissingPathError so the gate can repair it", err, err)
+				}
+				if missing.Path != tc.declared {
+					t.Fatalf("Path = %q, want %q", missing.Path, tc.declared)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("capture: %v", err)
+			}
+			// The other half of "iff": it succeeded, so the tree really holds it.
+			dst := t.TempDir()
+			if err := tr.Materialize(ctx, ref, dst); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(dst, filepath.FromSlash(tc.declared))); err != nil {
+				t.Fatalf("capture succeeded but the tree lacks %q: %v", tc.declared, err)
+			}
+		})
 	}
 }
 

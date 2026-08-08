@@ -65,8 +65,15 @@ type TreeCapturer interface {
 	CapturesTree()
 }
 
-// WorkspaceMaterializer is an optional [Backend] interface: a backend that can
-// turn a workspace ref in [Invocation.Inputs] into the directory it runs in.
+// WorkspaceMaterializer is an optional [Backend] interface: a backend that turns
+// a workspace ref in [Invocation.Inputs] into the directory it runs in.
+//
+// Implementing it is a REQUIREMENT, not merely a capability. The workspace input
+// IS the working directory, so a backend that materializes one cannot run
+// without one — and a caller can therefore reject that pairing from the plan
+// text alone, before anything is invoked. Declaring this on a backend that can
+// run with no workspace would make a statically impossible step look runnable
+// and cost an upstream invocation to discover otherwise.
 type WorkspaceMaterializer interface {
 	Backend
 	MaterializesWorkspace()

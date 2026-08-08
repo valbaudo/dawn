@@ -234,8 +234,8 @@ func TestShowRefCommandWritesTarToStdout(t *testing.T) {
 	backendFactory = func(trees *store.Trees) func(plan.Agent) (dawn.Backend, error) {
 		return func(plan.Agent) (dawn.Backend, error) {
 			return capturingBackend{
-				recordingBackend: recordingBackend{mu: &mu, calls: calls},
-				trees:            trees,
+				inner: recordingBackend{mu: &mu, calls: calls},
+				trees: trees,
 			}, nil
 		}
 	}
@@ -289,10 +289,16 @@ func TestShowRefCommandWritesTarToStdout(t *testing.T) {
 
 // capturingBackend writes a file and captures the real tree, so the committed
 // workspace ref points at bytes the store can archive.
+//
+// It captures but does not MATERIALIZE, which is the honest shape for a step
+// with no workspace input — preflight now refuses the other combination.
 type capturingBackend struct {
-	recordingBackend
+	inner recordingBackend
 	trees *store.Trees
 }
+
+func (b capturingBackend) Name() string { return "capturing" }
+func (capturingBackend) CapturesTree()  {}
 
 func (b capturingBackend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
 	dir, err := os.MkdirTemp("", "dawn-test-ws-*")
@@ -307,7 +313,7 @@ func (b capturingBackend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.
 	if err != nil {
 		return dawn.Result{}, err
 	}
-	res, err := b.recordingBackend.Invoke(ctx, in)
+	res, err := b.inner.Invoke(ctx, in)
 	if err != nil {
 		return dawn.Result{}, err
 	}
@@ -423,9 +429,15 @@ type recordingBackend struct {
 	want  int
 }
 
-func (b recordingBackend) Name() string           { return "recording" }
-func (b recordingBackend) CapturesTree()          {}
-func (b recordingBackend) MaterializesWorkspace() {}
+func (b recordingBackend) Name() string  { return "recording" }
+func (b recordingBackend) CapturesTree() {}
+
+// editingBackend is recordingBackend in the editing posture. Kept separate
+// because MaterializesWorkspace is a requirement: preflight refuses a step that
+// declares it without a workspace input.
+type editingBackend struct{ recordingBackend }
+
+func (editingBackend) MaterializesWorkspace() {}
 func (b recordingBackend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
 	b.mu.Lock()
 	*b.calls = append(*b.calls, in)
@@ -457,6 +469,42 @@ func (b recordingBackend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.
 	}}, nil
 }
 
+// peakBackend records the greatest number of invocations ever in flight at once.
+// It sleeps briefly so a scheduler that CAN overlap actually does; a run that
+// never overlaps still finishes, it just records a peak of 1.
+type peakBackend struct {
+	mu         *sync.Mutex
+	live, peak *int
+}
+
+func (peakBackend) Name() string { return "peak" }
+func (b peakBackend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
+	b.mu.Lock()
+	*b.live++
+	if *b.live > *b.peak {
+		*b.peak = *b.live
+	}
+	b.mu.Unlock()
+
+	select {
+	case <-time.After(60 * time.Millisecond):
+	case <-ctx.Done():
+	}
+
+	b.mu.Lock()
+	*b.live--
+	b.mu.Unlock()
+
+	out := map[string]any{}
+	if req, ok := in.Schema["required"].([]any); ok {
+		for _, f := range req {
+			name, _ := f.(string)
+			out[name] = "ok"
+		}
+	}
+	return dawn.Result{Output: out}, nil
+}
+
 // A flag the parser ACCEPTS but whose value never reaches the Runner is worse
 // than one it rejects: the run does something other than what was typed and says
 // nothing. Every flag here is asserted by its effect, so deleting the wiring for
@@ -470,8 +518,12 @@ func TestAcceptedFlagValuesReachTheRunner(t *testing.T) {
 		var mu sync.Mutex
 		calls := &[]dawn.Invocation{}
 		backendFactory = func(*store.Trees) func(plan.Agent) (dawn.Backend, error) {
-			return func(plan.Agent) (dawn.Backend, error) {
-				return recordingBackend{mu: &mu, calls: calls, gate: gate, want: want}, nil
+			return func(a plan.Agent) (dawn.Backend, error) {
+				base := recordingBackend{mu: &mu, calls: calls, gate: gate, want: want}
+				if a.Model == "edit" {
+					return editingBackend{base}, nil
+				}
+				return base, nil
 			}
 		}
 		return &mu, calls
@@ -497,7 +549,7 @@ func TestAcceptedFlagValuesReachTheRunner(t *testing.T) {
 
 	t.Run("--in binds the reserved root step", func(t *testing.T) {
 		_, calls := setup(t, nil, 0)
-		planPath := writePlan(t, "steps:\n  edit:\n    agent: fake/m\n    prompt: edit\n    inputs: {repo: in.workspace}\n")
+		planPath := writePlan(t, "steps:\n  edit:\n    agent: fake/edit\n    prompt: edit\n    inputs: {repo: in.workspace}\n")
 		host := t.TempDir()
 		if err := os.WriteFile(filepath.Join(host, "a.txt"), []byte("hi\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -536,19 +588,41 @@ func TestAcceptedFlagValuesReachTheRunner(t *testing.T) {
 		}
 	})
 
-	t.Run("--jobs actually overlaps independent steps", func(t *testing.T) {
-		// Both steps block until BOTH are in flight. With Jobs pinned to 1 this
-		// deadlocks and the context deadline fires, so the assertion is real
-		// concurrency rather than a value read back out of a struct.
-		gate := make(chan struct{})
-		setup(t, gate, 2)
-		planPath := writePlan(t, "steps:\n"+
-			"  left:\n    agent: fake/m\n    prompt: l\n"+
-			"  right:\n    agent: fake/m\n    prompt: r\n")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := execute(ctx, "run", []string{planPath, "--dir", t.TempDir(), "--jobs", "2"}); err != nil {
-			t.Fatalf("--jobs 2 must run the two independent steps at once: %v", err)
+	t.Run("--jobs is the cap, in both directions", func(t *testing.T) {
+		// A lower bound alone is half a test. Asserting only "at least 2 overlap"
+		// catches a mutation that runs FEWER steps than you typed and is blind to
+		// one that runs MORE — and --jobs is the operator's ceiling on simultaneous
+		// PAID invocations, so running more silently multiplies spend against what
+		// was asked for. Measure the peak and pin it exactly.
+		original := backendFactory
+		t.Cleanup(func() { backendFactory = original })
+		for _, jobs := range []int{1, 2, 3} {
+			t.Run(fmt.Sprintf("jobs=%d", jobs), func(t *testing.T) {
+				var mu sync.Mutex
+				var live, peak int
+				backendFactory = func(*store.Trees) func(plan.Agent) (dawn.Backend, error) {
+					return func(plan.Agent) (dawn.Backend, error) {
+						return peakBackend{mu: &mu, live: &live, peak: &peak}, nil
+					}
+				}
+				var steps strings.Builder
+				steps.WriteString("steps:\n")
+				for i := range 6 {
+					fmt.Fprintf(&steps, "  s%d:\n    agent: fake/m\n    prompt: p%d\n", i, i)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				err := execute(ctx, "run",
+					[]string{writePlan(t, steps.String()), "--dir", t.TempDir(), "--jobs", fmt.Sprint(jobs)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if peak != jobs {
+					t.Fatalf("--jobs %d ran %d steps at once", jobs, peak)
+				}
+			})
 		}
 	})
 }

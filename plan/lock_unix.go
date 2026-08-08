@@ -1,4 +1,11 @@
-//go:build unix
+//go:build unix && !solaris && !aix
+
+// Go's `unix` build tag includes solaris and aix, and NEITHER has syscall.Flock
+// — so `//go:build unix` alone did not mean "flock is available here", it meant
+// the plan package did not compile there at all. The two are named explicitly
+// rather than listing the platforms that do work, so a future GOOS that Go adds
+// to `unix` WITH flock is picked up automatically and one without it fails loudly
+// at build time instead of silently losing the lock.
 
 package plan
 

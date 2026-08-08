@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/valbaudo/dawn"
+	"github.com/valbaudo/dawn/gate"
 	"github.com/valbaudo/dawn/store"
 )
 
@@ -93,21 +94,33 @@ func readArgv(t *testing.T, path string) []string {
 func TestBackendStablePrefixFlag(t *testing.T) {
 	argvPath := filepath.Join(t.TempDir(), "argv")
 	t.Setenv("DAWN_TEST_ARGV", argvPath)
+	// A JSON payload, because a schema'd invocation parses the reply — a fake that
+	// answers with prose fails before the flag assertion is ever reached.
 	bin := fakeCLI(t, `printf '%s\000' "$@" > "$DAWN_TEST_ARGV"
- echo '{"type":"result","is_error":false,"result":"pong","usage":{}}'`)
+ echo '{"type":"result","is_error":false,"result":"{\"text\":\"pong\"}","usage":{}}'`)
 
-	// BOTH branches. Testing only the empty-System case leaves the flag deletable
-	// on the path that carries the panel: gate.Judge is the one production caller
-	// that supplies a System, so a caching regression there would ship green.
+	// THE PROPERTY: --system-prompt is present on EVERY invocation, whatever the
+	// invocation looks like. Naming one axis is how the last version of this test
+	// stayed green while the flag was deletable on the path that matters —
+	// gate.Judge sets System AND Schema, and a subtest that set only System did
+	// not reproduce a single real judge call. Vary both, and vary them together.
 	for _, tc := range []struct {
 		name, system, want string
+		schema             map[string]any
 	}{
-		{name: "default system", system: "", want: defaultSystem},
-		{name: "caller system (the gate.Judge path)", system: "Approve only concise summaries.", want: "Approve only concise summaries."},
+		{name: "bare", want: defaultSystem},
+		{name: "system only", system: "Be strict.", want: "Be strict."},
+		{name: "schema only", schema: map[string]any{"type": "object"}, want: defaultSystem},
+		{
+			// The exact shape gate.Judge builds: criteria as System, verdict Schema.
+			name:   "system and schema, as gate.Judge sends it",
+			system: "Approve only concise summaries.", want: "Approve only concise summaries.",
+			schema: map[string]any{"type": "object", "required": []any{"approved", "reason"}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := (Backend{Model: "haiku", Bin: bin}).Invoke(context.Background(),
-				dawn.Invocation{Prompt: "ping", System: tc.system})
+				dawn.Invocation{Prompt: "ping", System: tc.system, Schema: tc.schema})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -120,6 +133,30 @@ func TestBackendStablePrefixFlag(t *testing.T) {
 			t.Fatalf("argv lacks --system-prompt %q: %q", tc.want, args)
 		})
 	}
+}
+
+// The property held against the caller that actually matters. gate.Judge is the
+// only production path that supplies a System, so the caching claim in
+// docs/caching-measurements.md stands or falls on the flag surviving THIS call
+// shape — not on a hand-built Invocation that resembles it.
+func TestJudgeInvocationsCarryTheStablePrefixFlag(t *testing.T) {
+	argvPath := filepath.Join(t.TempDir(), "argv")
+	t.Setenv("DAWN_TEST_ARGV", argvPath)
+	bin := fakeCLI(t, `printf '%s\000' "$@" > "$DAWN_TEST_ARGV"
+ echo '{"type":"result","is_error":false,"result":"{\"approved\":true,\"reason\":\"ok\"}","usage":{}}'`)
+
+	v := gate.Judge(context.Background(), Backend{Model: "haiku", Bin: bin},
+		"Approve only concise summaries.", "the candidate")
+	if v.Err != nil {
+		t.Fatalf("judge: %v", v.Err)
+	}
+	args := readArgv(t, argvPath)
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--system-prompt" && args[i+1] == "Approve only concise summaries." {
+			return
+		}
+	}
+	t.Fatalf("a real judge call lost the stable prefix: %q", args)
 }
 
 // Unattended plus no deadline means a hung tool call burns the night looking like

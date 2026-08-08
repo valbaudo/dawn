@@ -92,9 +92,21 @@ func critique(votes []Verdict) string {
 	var b strings.Builder
 	b.WriteString(rejectionHeading)
 	for _, v := range votes {
-		if !v.Approved && v.Reason != "" {
-			fmt.Fprintf(&b, "- %s: %s\n", v.Judge, v.Reason)
+		if v.Approved {
+			continue
 		}
+		// A rejection with no stated reason is still an objection, and it is the
+		// only thing the next attempt has to go on. Skipping it silently produced a
+		// critique that was nothing but the heading: the generator was told it had
+		// been refused and not one word about what to change, so repair burned its
+		// whole budget regenerating against no signal. `reason` is optional to a
+		// VOTE — only `approved` is counted — and load-bearing to a REPAIR, which
+		// is why it is tolerated on the way in and named on the way out.
+		if v.Reason == "" {
+			fmt.Fprintf(&b, "- %s: rejected without a stated reason\n", v.Judge)
+			continue
+		}
+		fmt.Fprintf(&b, "- %s: %s\n", v.Judge, v.Reason)
 	}
 	return b.String()
 }

@@ -19,10 +19,14 @@ import (
 // Workspace is an [dawn.Backend] that runs `claude -p` INSIDE a directory, letting
 // the agent edit files, and captures the result as a content-addressed tree ref.
 //
-// It snapshots the tree before and after the turn, so Result.Produced carries the
-// new workspace ref and Result.Output carries the diff between the two. Because
-// both are refs in the same [store.Trees], any two captured versions can be
-// diffed later, not just consecutive ones.
+// It snapshots the tree ONCE, after the turn, and diffs that against the input
+// ref it was already handed — so Result.Produced carries the new workspace ref
+// and Result.Output carries the diff from the tree it started with. There is no
+// before-snapshot: re-capturing the directory just materialized would pay a full
+// extra capture per invocation to re-derive a ref already in hand, and a
+// re-derivation that DIFFERS from the thing it re-derives is how a declared
+// artifact went missing. Because both ends are refs in the same [store.Trees],
+// any two captured versions can be diffed later, not just consecutive ones.
 //
 // The directory needs no .git of its own; the tree store is the only repository
 // involved. The workspace ref in Invocation.Inputs is materialized into a fresh
