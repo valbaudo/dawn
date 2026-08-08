@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // LockRun takes an exclusive, non-blocking lock on a state directory for the
-// duration of a run on Unix, and returns its release. On non-Unix platforms it
-// opens the lock file but performs no interprocess locking.
+// duration of a run, and returns its release.
 //
 // Two `dawn run` processes against one --dir corrupt nothing: journal lines are
 // atomic O_APPEND writes and blobs are content-addressed, so the log stays
@@ -42,3 +42,17 @@ func LockRun(dir string) (release func(), err error) {
 		_ = f.Close()
 	}, nil
 }
+
+// LOCK_NB, never a blocking wait: an overrunning cron should be told it is late,
+// not queued behind the run it is duplicating.
+//
+// No build tag. dawn supports macOS and Linux, both of which have flock, and an
+// unsupported platform fails to build rather than receiving a no-op — see
+// platform.go. The previous arrangement shipped a silent downgrade: on Windows
+// this function returned nil, so the guarantee above simply did not hold and
+// nothing said so.
+func lockFile(f *os.File) error {
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+}
+
+func unlockFile(f *os.File) { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }

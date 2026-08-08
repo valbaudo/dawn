@@ -16,6 +16,7 @@ package proc
 import (
 	"context"
 	"os/exec"
+	"syscall"
 	"time"
 )
 
@@ -38,4 +39,33 @@ func Command(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd.WaitDelay = WaitDelay
 	cmd.Stdin = nil
 	return cmd
+}
+
+// setpgid puts the child in a new process group whose id is the child's pid, so
+// the group can be signalled as a unit.
+//
+// No build tag, for the reason in platform.go: the non-Unix version of this file
+// killed only the direct child, which is precisely the bug this package exists to
+// prevent — an agent CLI's tool subprocesses keep the inherited pipe open and the
+// timeout becomes a hang that looks like slow work. A guarantee that quietly
+// degrades on a platform nobody tested is worse than one that refuses to build.
+func setpgid(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+// killGroup signals the child's whole process group. A negative pid means "the
+// group with this id", which is why setpgid makes the group id equal the child's
+// pid. Falls back to the direct child if the group is already gone (a race with
+// normal exit).
+func killGroup(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return nil
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		return cmd.Process.Kill()
+	}
+	return nil
 }

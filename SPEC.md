@@ -537,9 +537,7 @@ Exit `0` accepted · `1` **gate refused** · `2` usage/parse/validate · `3` mec
 else gives you is *the panel refused* vs *the machine broke*.
 
 **SIGINT and SIGTERM cancel the run.** On Unix each agent is placed in its own process
-group and cancellation kills the whole group, including tool subprocesses. On non-Unix
-platforms cancellation kills only the direct child. On every platform a 5s `WaitDelay`
-bounds waiting for inherited pipes; process-group reaping is a Unix-only guarantee.
+group and cancellation kills the whole group, including tool subprocesses.
 
 An interrupt is **not a verdict**. Cancelling mid-gate cancels every judge at once, which
 is indistinguishable from a unanimous no by vote count alone; the judges' errors make the
@@ -547,21 +545,21 @@ round mechanical, so an interrupt never records a rejection and never spends a r
 attempt. It exits `130` even though the underlying error is mechanical, because *the
 operator stopped it* and *the machine broke* are different facts.
 
-**On Unix, one `run` per state directory is enforced by a non-blocking `flock`.** Two
+**One `run` per state directory, enforced by a non-blocking `flock`.** Two
 runs against one `--dir` corrupt nothing — journal lines are atomic appends and blobs are
 content-addressed — but they can both miss the same key, execute it, and pay. The second
 Unix run is refused rather than queued, and the kernel releases the lock when its process
 dies. `dawn show` never locks.
 
-**"Unix" here means "has `syscall.Flock`", which is not the same set as Go's `unix` build
-tag.** That tag includes **solaris** and **aix**, and neither provides `Flock` — so
-`//go:build unix` did not mean "the lock works here", it meant the `plan` package did not
-compile there at all, and a CI job that cross-built only Windows compiled one side of one
-split and reported the tags covered. The lock is built for `unix && !solaris && !aix`;
-everywhere else — solaris, aix, Windows, plan9, js — the implementation is a no-op, the
-binary still builds, and concurrent runs against one state directory are unguarded: both
-miss the same key, both execute it, both pay. CI cross-builds and vets every platform
-whose build-tagged file differs, which is the only way this stays true.
+**macOS and Linux only.** Both mechanisms above need POSIX primitives, and dawn refuses
+to build anywhere else rather than degrade. It used to build everywhere and hand the rest
+a no-op: on Windows `lockFile` returned nil and the process kill reached only the direct
+child, so two guarantees this document states plainly did not hold, and the binary
+compiling was the only signal anyone got. Enumerating which platforms had `flock` was the
+wrong exercise twice over — first it excluded solaris and aix and broke the build, then
+excluding them broke illumos, which has `flock` but carries the `solaris` tag. The answer
+was never a better list. Adding a platform means implementing the primitives there and
+widening one constraint in `platform.go`, deliberately.
 
 ---
 
@@ -683,9 +681,8 @@ The code implements this spec. `dawn run` and `dawn show` work end to end: typed
 outputs with load-time reference checking, inputs resolved by field name, `expect:`,
 gates with quorum and bounded repair, the identity key, the append-only journal,
 `--redo`, `--in`, `--jobs` step concurrency, per-step scratch dirs, deterministic tree
-capture and materialize, stable prefixes, Unix process-group cancellation, and the
-exit-code table. Run locking and process-group cancellation have the platform exceptions
-documented in the CLI section.
+capture and materialize, stable prefixes, process-group cancellation, and the
+exit-code table, on macOS and Linux.
 
 Not yet: more backends than `claude` and `claude-ws` (codex, an HTTP LLM). They slot
 behind existing seams.

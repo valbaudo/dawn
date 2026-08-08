@@ -164,14 +164,18 @@ missing channel quietly becoming the old channel is how a fail-open comes back.
 Timeouts have to actually fire, too. An agent CLI spawns tool subprocesses that
 inherit its stdout, so killing the CLI alone leaves the pipe open and a cancelled
 context turns into a hang that looks exactly like slow work. On Unix each child
-runs in its own process group and cancellation kills that group. On non-Unix
-platforms cancellation kills only the direct child; on every platform a five-second
-`WaitDelay` bounds waiting for inherited pipes.
+runs in its own process group and cancellation kills that group, tool subprocesses
+included. `run` also takes a non-blocking `flock` on its state directory, so a cron
+that overruns its own interval is told it is late rather than quietly paying twice;
+`show` never locks, because reading committed state is always safe.
 
-One-run-per-state-directory locking is also Unix-only: `run` takes a non-blocking
-`flock`, while `show` never locks. Non-Unix builds compile, but the run lock is a
-no-op, so concurrent runs can duplicate work and cost. This lock prevents duplicate
-payment, not storage corruption.
+**macOS and Linux only, and an unsupported platform fails to BUILD.** Both of those
+guarantees need POSIX primitives, and the previous arrangement compiled everywhere
+by handing the others a no-op — on Windows the lock returned nil and the kill hit
+only the direct child, so two documented promises silently did not hold and a
+working build was the only evidence anyone had. Adding a platform is a decision
+(implement the primitives, prove them, widen the constraint in `platform.go`), never
+a fallback. WSL is Linux and works today.
 
 ## Not here yet
 
